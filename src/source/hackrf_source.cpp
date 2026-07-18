@@ -47,8 +47,12 @@ bool HackRfSource::start() {
         return false;
     }
     hackrf_set_sample_rate(dev_, cfg_.sample_rate);
+    // 0.9*rate, not the usual 0.75: at 10 MSPS the analog filter must stay
+    // open through the chroma upper sideband (+-4.6 MHz), or color washes
+    // out just like a too-narrow digital channel filter.
     hackrf_set_baseband_filter_bandwidth(
-        dev_, hackrf_compute_baseband_filter_bw(8000000));
+        dev_, hackrf_compute_baseband_filter_bw(
+                  static_cast<uint32_t>(cfg_.sample_rate * 0.9)));
     hackrf_set_freq(dev_, static_cast<uint64_t>(cfg_.center_hz()));
     hackrf_set_amp_enable(dev_, cfg_.amp ? 1 : 0);
     hackrf_set_lna_gain(dev_, static_cast<uint32_t>(lna_));

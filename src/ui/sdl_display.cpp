@@ -242,9 +242,9 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
         // Superimpose the OSD into the frame itself (inset toward the
         // lower right, like a real TV) so CRT distortion applies to it.
         osd_frame_ = last_frame_;
-        if (stats.channel > 0) {
-            char ch[8];
-            std::snprintf(ch, sizeof(ch), "CH%d", stats.channel);
+        {
+            // Big green channel readout, top-left (band+channel, e.g. "F4").
+            const std::string ch = stats.channel.empty() ? "---" : stats.channel;
             frame_text(osd_frame_, 48, 40, ch, 40, 255, 80, 6);
         }
         if (stats.recording) {
@@ -257,10 +257,12 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
         std::snprintf(l1, sizeof(l1), "V-SYNC:%s H-SYNC:%s %.1fFPS",
                       stats.vsync_locked ? "OK" : "--",
                       stats.line_locked ? "OK" : "--", stats.fps);
-        std::snprintf(l2, sizeof(l2), "VHF:%.2fMHz AUD:%.2fMHz",
-                      stats.freq_mhz, stats.audio_mhz);
-        std::snprintf(l3, sizeof(l3), "DELAY V:%.0fms A:%.0fms",
-                      stats.video_latency_ms, stats.audio_latency_ms);
+        if (stats.channel.empty())
+            std::snprintf(l2, sizeof(l2), "%.0fMHz", stats.freq_mhz);
+        else
+            std::snprintf(l2, sizeof(l2), "%.0fMHz (%s)", stats.freq_mhz,
+                          stats.channel.c_str());
+        std::snprintf(l3, sizeof(l3), "DELAY %.0fms", stats.video_latency_ms);
         std::string t1(l1), t2(l2), t3(l3);
         const int right = Frame::kWidth - 28;
         frame_text(osd_frame_,

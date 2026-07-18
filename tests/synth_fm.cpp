@@ -1,6 +1,8 @@
-// Golden test: synthesize an NTSC-J color-bar RF signal as int8 IQ, run it
-// through the same DSP chain as the live pipeline, and assert the decoded
-// RGB values match the transmitted bars.
+// Golden test for the FPV FM path: synthesize an FM-ATV NTSC color-bar
+// signal as int8 IQ (composite frequency-modulates the carrier, sync tip at
+// the lowest frequency), run it through the same DSP chain as the live FM
+// pipeline, and assert the decoded RGB values match the transmitted bars.
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -9,18 +11,21 @@
 #include <vector>
 
 #include "config.hpp"
-#include "dsp/am_detector.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
+#include "dsp/fm_detector.hpp"
 #include "dsp/frame.hpp"
-#include "dsp/nco.hpp"
 #include "dsp/ntsc_decoder.hpp"
 
 using namespace famidec;
 
 namespace {
 
+// Default pipeline rate; deviation matches a real 5.8 GHz VTX (~2.5 MHz
+// peak — +-5 MHz would sit at the 10 MSPS Nyquist edge where the phase
+// step +-pi is ambiguous).
 constexpr double kFs = 10e6;
+constexpr double kDev = 2.5e6;
 constexpr double kFsc = 315e6 / 88.0;
 constexpr double kLineUs = 1e6 / 15734.264;  // 63.555 us
 constexpr int kLinesPerField = 262;
@@ -69,37 +74,35 @@ float composite_ire(int line, double us, double theta) {
 int main(int argc, char** argv) {
     Config cfg;
     cfg.sample_rate = kFs;
-    cfg.offset_hz = 2.0e6;
+    cfg.offset_hz = 0.0;
     cfg.mode = Config::Mode::Color;
+    cfg.fm_dev_hz = kDev;
 
     const int fields = 30;
     const size_t total = static_cast<size_t>(fields * kLinesPerField *
                                              kLineUs * kFs / 1e6);
-    // Synthesize int8 IQ with the video carrier at -2.0 MHz.
+    // FM modulate: sync tip (-40 IRE) -> -dev, white (+100 IRE) -> +dev.
     std::vector<uint8_t> iq(total * 2);
     const double omega_sc = 2.0 * M_PI * kFsc / kFs;
-    const double omega_c = -2.0 * M_PI * cfg.offset_hz / kFs;
     const double samples_per_line = kFs * kLineUs / 1e6;
     const double samples_per_field = samples_per_line * kLinesPerField;
+    double phase = 0.0;
     for (size_t n = 0; n < total; ++n) {
         double in_field = std::fmod(static_cast<double>(n), samples_per_field);
         int line = static_cast<int>(in_field / samples_per_line);
         double us = std::fmod(in_field, samples_per_line) / kFs * 1e6;
         double theta = std::fmod(omega_sc * static_cast<double>(n), 2.0 * M_PI);
         float ire = composite_ire(line, us, theta);
-        // Negative modulation: sync tip = 100% carrier, white = 12.5%.
-        float amp = 0.75f - ire * (0.625f / 100.0f);
-        double phase = omega_c * static_cast<double>(n);
-        auto clip8 = [](float x) {
-            return static_cast<int8_t>(std::lround(std::fmax(-127.0f, std::fmin(127.0f, x))));
+        double f = kDev * ((ire + 40.0) / 70.0 - 1.0);
+        phase = std::fmod(phase + 2.0 * M_PI * f / kFs, 2.0 * M_PI);
+        auto clip8 = [](double x) {
+            return static_cast<int8_t>(std::lround(std::fmax(-127.0, std::fmin(127.0, x))));
         };
-        iq[2 * n] = static_cast<uint8_t>(
-            clip8(100.0f * amp * static_cast<float>(std::cos(phase))));
-        iq[2 * n + 1] = static_cast<uint8_t>(
-            clip8(100.0f * amp * static_cast<float>(std::sin(phase))));
+        iq[2 * n] = static_cast<uint8_t>(clip8(100.0 * std::cos(phase)));
+        iq[2 * n + 1] = static_cast<uint8_t>(clip8(100.0 * std::sin(phase)));
     }
 
-    // Optional: dump the synthetic IQ as .cs8 for end-to-end famidec tests.
+    // Optional: dump the synthetic IQ as .cs8 for end-to-end fpvdec tests.
     if (argc > 1) {
         std::FILE* fp = std::fopen(argv[1], "wb");
         if (!fp) return 1;
@@ -109,13 +112,12 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Same chain as the live pipeline.
+    // Same chain as the live FM pipeline (default: no post-detector LPF).
     TripleBuffer tb;
     NtscDecoder dec(cfg, tb);
     DcBlocker dcb;
-    Nco mixer(cfg.offset_hz, kFs);
-    FirFilterC lpf(design_lowpass(4.3e6, kFs, 63));
-    EnvelopeDetector env;
+    FirFilterC chan_lpf(design_lowpass(std::min(8.0e6, kFs * 0.49), kFs, 47));
+    FmDetector fm_det(kFs, cfg.fm_dev_hz, cfg.invert);
 
     constexpr size_t kBlock = 32768;
     std::vector<std::complex<float>> cbuf(kBlock);
@@ -126,10 +128,10 @@ int main(int argc, char** argv) {
             std::complex<float> c(
                 static_cast<int8_t>(iq[2 * (off + i)]) / 128.0f,
                 static_cast<int8_t>(iq[2 * (off + i) + 1]) / 128.0f);
-            cbuf[i] = dcb.process(c) * mixer.next();
+            cbuf[i] = dcb.process(c);
         }
-        lpf.process(cbuf.data(), cbuf.data(), ns);
-        env.process(cbuf.data(), comp.data(), ns);
+        chan_lpf.process(cbuf.data(), cbuf.data(), ns);
+        fm_det.process(cbuf.data(), comp.data(), ns);
         dec.process(comp.data(), ns);
     }
 

@@ -80,12 +80,41 @@ bool NtscDecoder::find_hsync_edge(double lo, double hi, double* edge_out,
     int64_t end = std::min(static_cast<int64_t>(hi), comp_end() - 8 * samples_per_us_);
     for (int64_t j = start; j < end; ++j) {
         if (ire(j - 1) >= kSyncSliceIre && ire(j) < kSyncSliceIre) {
-            // pulse width check: hsync is ~4.7 us
-            int64_t k = j;
-            int64_t maxw = j + 7 * samples_per_us_;
-            while (k < maxw && ire(k) < kSyncSliceIre) ++k;
-            int64_t w = k - j;
-            if (w < 3 * samples_per_us_ || w > 6 * samples_per_us_) continue;
+            // Noise-tolerant pulse qualification. Fraction counts instead of
+            // one contiguous run, so a noise spike inside the pulse cannot
+            // split it — but anchored: chroma of bright saturated video dips
+            // below the slice level every subcarrier cycle, and such a dip
+            // shortly before the real sync must not qualify as the edge.
+            //  - anchor: >=90% of the 2 us AFTER the candidate must be
+            //    asserted. True at a real pulse start (interior); false at a
+            //    chroma dip (the following samples are mostly above).
+            //  - width: a 6 us window must hold 3..5.5 us of asserted
+            //    samples (hsync is 4.7 us; equalizing pulses ~2.3 us fail
+            //    the minimum, vsync broad pulses fail the maximum).
+            const int64_t anchor_n = 2 * samples_per_us_;
+            int64_t a_cnt = 0;
+            for (int64_t m = j; m < j + anchor_n; ++m)
+                if (ire(m) < kSyncSliceIre) ++a_cnt;
+            if (10 * a_cnt < 9 * anchor_n) continue;
+            int64_t maxw = j + 6 * samples_per_us_;
+            int64_t w = a_cnt;
+            for (int64_t m = j + anchor_n; m < maxw; ++m)
+                if (ire(m) < kSyncSliceIre) ++w;
+            if (w < 3 * samples_per_us_ || w > 11 * samples_per_us_ / 2) {
+#ifdef SYNC_DEBUG
+                std::fprintf(stderr, "reject j=%lld w=%lld\n",
+                             static_cast<long long>(j),
+                             static_cast<long long>(w));
+#endif
+                continue;
+            }
+            // Trailing edge with noise gaps healed: for AGC tip averaging.
+            int64_t k = j + w;
+#ifdef SYNC_DEBUG
+            std::fprintf(stderr, "accept j=%lld w=%lld\n",
+                         static_cast<long long>(j),
+                         static_cast<long long>(w));
+#endif
             // sub-sample interpolation of the threshold crossing
             float a = ire(j - 1), b = ire(j);
             double frac = (a - kSyncSliceIre) / (a - b);
@@ -138,8 +167,27 @@ void NtscDecoder::decode_lines() {
             bool ok = find_hsync_edge(predicted - 2 * samples_per_us_,
                                       predicted + 2 * samples_per_us_,
                                       &measured, &pulse_begin_, &pulse_end_);
-            double edge = pll_.advance(ok, measured);
+            double edge;
+            if (!ok && pll_.coast >= 4 &&
+                find_hsync_edge(predicted - 0.5 * pll_.period,
+                                predicted + 0.5 * pll_.period, &measured,
+                                &pulse_begin_, &pulse_end_)) {
+                // Interlaced vsync shifts the hsync phase by half a line
+                // every other field — the narrow window can never recover
+                // from that. Snap the flywheel onto the pulse found in a
+                // full-line search instead of filtering toward it.
+                pll_.acquire(measured, pll_.period);
+                edge = measured;
+                ok = true;
+            } else {
+                edge = pll_.advance(ok, measured);
+            }
             if (!ok) stats_.lines_coasted.fetch_add(1, std::memory_order_relaxed);
+#ifdef SYNC_DEBUG
+            if (!ok)
+                std::fprintf(stderr, "coast line=%d pred=%.1f\n", line_no_,
+                             predicted);
+#endif
             stats_.line_locked.store(pll_.locked, std::memory_order_relaxed);
             stats_.line_period.store(static_cast<float>(pll_.period),
                                      std::memory_order_relaxed);
@@ -298,25 +346,34 @@ void NtscDecoder::decode_row(double edge) {
         size_t n = static_cast<size_t>(a1 - a0);
         su_.resize(n);
         sv_.resize(n);
-        double th = std::fmod(omega_sc_ * static_cast<double>(a0), 2.0 * M_PI) + phi;
+        // Subcarrier as a rotating phasor: one complex multiply per sample
+        // instead of sin+cos (which at 20 MSPS costs more than the FIRs).
+        // Float drift over one line (~1e-4) is far below chroma tolerances.
+        double th0 = std::fmod(omega_sc_ * static_cast<double>(a0), 2.0 * M_PI) + phi;
+        std::complex<float> ph(static_cast<float>(std::cos(th0)),
+                               static_cast<float>(std::sin(th0)));
+        const std::complex<float> rot(static_cast<float>(std::cos(omega_sc_)),
+                                      static_cast<float>(std::sin(omega_sc_)));
         for (size_t j = 0; j < n; ++j) {
             float c = chroma_at(a0 + static_cast<int64_t>(j));
-            float s = std::sin(static_cast<float>(th));
-            float co = std::cos(static_cast<float>(th));
-            su_[j] = 2.0f * c * s;
-            sv_[j] = 2.0f * c * co;
-            th += omega_sc_;
-            if (th > 2.0 * M_PI) th -= 2.0 * M_PI;
+            su_[j] = 2.0f * c * ph.imag();
+            sv_[j] = 2.0f * c * ph.real();
+            ph *= rot;
         }
         // Zero-history per-line LPF (edge transients land in blanking).
+        // Forward dot product (taps are symmetric, so no reversal needed)
+        // keeps the inner loop auto-vectorizable.
         size_t nt = uv_taps_.size();
         suf_.assign(n, 0.0f);
         svf_.assign(n, 0.0f);
+        const float* t = uv_taps_.data();
         for (size_t i = nt - 1; i < n; ++i) {
+            const float* wu = su_.data() + (i - (nt - 1));
+            const float* wv = sv_.data() + (i - (nt - 1));
             float au = 0.0f, av = 0.0f;
             for (size_t k = 0; k < nt; ++k) {
-                au += su_[i - k] * uv_taps_[k];
-                av += sv_[i - k] * uv_taps_[k];
+                au += wu[k] * t[k];
+                av += wv[k] * t[k];
             }
             suf_[i] = au;
             svf_[i] = av;

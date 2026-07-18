@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
@@ -11,18 +13,17 @@
 #include <vector>
 
 #include "config.hpp"
-#include "dsp/am_detector.hpp"
-#include "dsp/fm_audio.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
+#include "dsp/fm_detector.hpp"
 #include "dsp/frame.hpp"
 #include "dsp/nco.hpp"
 #include "dsp/ntsc_decoder.hpp"
 #include "source/file_source.hpp"
 #include "source/hackrf_source.hpp"
 #include "source/sample_source.hpp"
-#include "ui/sdl_audio.hpp"
 #include "ui/sdl_display.hpp"
+#include "util/fpv_channels.hpp"
 #include "util/spectrum.hpp"
 
 using namespace famidec;
@@ -31,28 +32,31 @@ namespace {
 
 void usage() {
     std::printf(
-        "famidec - Famicom RF (NTSC-J) HackRF One decoder\n\n"
-        "usage: famidec [options]\n"
-        "  --channel 1|2         Japan VHF channel preset (default 1)\n"
-        "  --freq HZ             explicit video carrier frequency\n"
+        "fpvdec - 5.8 GHz analog FPV (FM-ATV, NTSC) HackRF One decoder\n\n"
+        "usage: fpvdec [options]\n"
+        "  --channel NAME        FPV channel preset, band A/B/E/F/R + 1-8\n"
+        "                        e.g. F4, R1 (default F4 = 5800 MHz)\n"
+        "  --freq HZ             explicit carrier frequency\n"
+        "  --dev HZ              FM peak deviation (default 5e6)\n"
+        "  --invert              flip discriminator polarity (non-standard VTX)\n"
+        "  --lpf HZ              optional post-detector video LPF, e.g. 4.2e6\n"
+        "                        for the NTSC video bandwidth (default off)\n"
         "  --input hackrf|file   input source (default hackrf)\n"
         "  --file PATH           .cs8 recording for --input file\n"
         "  --loop                loop file playback\n"
         "  --rate HZ             sample rate (default 10e6)\n"
-        "  --offset HZ           tuning offset above carrier (default 2e6)\n"
+        "  --offset HZ           tuning offset above carrier (default 0)\n"
         "  --lna N --vga N --amp gain settings\n"
         "  --mode color|gray     decode mode (default color)\n"
-        "  --detector envelope|sync  AM detector (default envelope)\n"
         "  --sat F --hue DEG     color trims\n"
         "  --overscan F          horizontal crop per side 0..0.15 (default 0.047)\n"
-        "  --no-audio            disable FM audio output\n"
-        "  --volume F            audio volume 0..1 (default 0.7)\n"
         "  --record PATH         tee raw IQ to .cs8 while decoding\n"
         "  --dump-composite PATH write post-AGC composite as f32\n"
         "  --dump-frames PREFIX  write decoded frames as PPM (headless)\n"
         "  --frames N            number of frames for --dump-frames (default 30)\n"
         "  --spectrum            print PSD and exit (no video)\n"
-        "\nkeys: q/ESC quit, l/L LNA +/-, g/G VGA +/-, c color toggle, s screenshot\n");
+        "\nkeys: q/ESC quit, l/L LNA, g/G VGA, c color, s screenshot, h help,\n"
+        "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ\n");
 }
 
 bool parse_args(int argc, char** argv, Config* cfg) {
@@ -66,10 +70,13 @@ bool parse_args(int argc, char** argv, Config* cfg) {
             return argv[++i];
         };
         if (a == "--channel") {
-            int ch = std::atoi(next("--channel"));
-            if (ch == 1) cfg->video_carrier_hz = 91.25e6;
-            else if (ch == 2) cfg->video_carrier_hz = 97.25e6;
-            else { std::fprintf(stderr, "channel must be 1 or 2\n"); return false; }
+            std::string v = next("--channel");
+            if (!fpv_channel_freq(v, &cfg->video_carrier_hz)) {
+                std::fprintf(stderr,
+                             "bad channel %s (band A/B/E/F/R + 1-8, e.g. F4)\n",
+                             v.c_str());
+                return false;
+            }
         } else if (a == "--freq") cfg->video_carrier_hz = std::atof(next("--freq"));
         else if (a == "--input") {
             std::string v = next("--input");
@@ -86,12 +93,9 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         else if (a == "--mode") {
             std::string v = next("--mode");
             cfg->mode = (v == "gray") ? Config::Mode::Gray : Config::Mode::Color;
-        } else if (a == "--detector") {
-            std::string v = next("--detector");
-            cfg->detector = (v == "sync") ? Config::Detector::SyncPLL
-                                          : Config::Detector::Envelope;
-        } else if (a == "--no-audio") cfg->audio = false;
-        else if (a == "--volume") cfg->volume = std::atof(next("--volume"));
+        } else if (a == "--dev") cfg->fm_dev_hz = std::atof(next("--dev"));
+        else if (a == "--invert") cfg->invert = true;
+        else if (a == "--lpf") cfg->video_lpf_hz = std::atof(next("--lpf"));
         else if (a == "--overscan") cfg->overscan = std::atof(next("--overscan"));
         else if (a == "--sat") cfg->saturation = std::atof(next("--sat"));
         else if (a == "--hue") cfg->hue_deg = std::atof(next("--hue"));
@@ -115,12 +119,14 @@ void write_ppm(const Frame& f, const std::string& path) {
     std::FILE* fp = std::fopen(path.c_str(), "wb");
     if (!fp) return;
     std::fprintf(fp, "P6\n%d %d\n255\n", Frame::kWidth, Frame::kHeight);
+    std::vector<uint8_t> rgb(f.rgba.size() * 3);
+    size_t o = 0;
     for (uint32_t px : f.rgba) {
-        uint8_t rgb[3] = {static_cast<uint8_t>(px & 0xff),
-                          static_cast<uint8_t>((px >> 8) & 0xff),
-                          static_cast<uint8_t>((px >> 16) & 0xff)};
-        std::fwrite(rgb, 1, 3, fp);
+        rgb[o++] = static_cast<uint8_t>(px & 0xff);
+        rgb[o++] = static_cast<uint8_t>((px >> 8) & 0xff);
+        rgb[o++] = static_cast<uint8_t>((px >> 16) & 0xff);
     }
+    std::fwrite(rgb.data(), 1, rgb.size(), fp);
     std::fclose(fp);
 }
 
@@ -184,7 +190,7 @@ private:
 std::string next_recording_path() {
     for (int i = 1; i < 1000; ++i) {
         char name[64];
-        std::snprintf(name, sizeof(name), "famidec_rec_%03d.cs8", i);
+        std::snprintf(name, sizeof(name), "fpvdec_rec_%03d.cs8", i);
         std::FILE* f = std::fopen(name, "rb");
         if (f) {
             std::fclose(f);
@@ -192,27 +198,38 @@ std::string next_recording_path() {
         }
         return name;
     }
-    return "famidec_rec_overflow.cs8";
+    return "fpvdec_rec_overflow.cs8";
 }
 
-// cs8 IQ bytes -> complex -> DC block -> mix carrier to 0 Hz -> channel LPF
-// -> AM detect -> NtscDecoder.
+// cs8 IQ bytes -> complex -> DC block -> [mix carrier to 0 Hz] -> channel
+// LPF -> FM discriminate -> [video LPF] -> NtscDecoder.
 void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
-                Recorder* rec, FmAudioDemod* fm, SdlAudioOut* aout) {
+                Recorder* rec) {
     constexpr size_t kBlockBytes = 1 << 16;  // 32768 complex samples
     std::vector<uint8_t> raw(kBlockBytes);
     std::vector<std::complex<float>> iq(kBlockBytes / 2);
     std::vector<float> comp(kBlockBytes / 2);
 
     DcBlocker dcb;
+    // The NCO costs a sin+cos per sample — only run it when actually
+    // offset-tuned (the FPV default is offset 0, carrier at DC).
+    const bool mix = cfg.offset_hz != 0.0;
     Nco mixer(cfg.offset_hz, cfg.sample_rate);  // shift -offset..: see below
-    FirFilterC chan_lpf(
-        [&] {
-            auto t = design_lowpass(4.3e6, cfg.sample_rate, 63);
-            return t;
-        }());
-    EnvelopeDetector env;
-    SyncDetector sync_det(cfg.sample_rate);
+    // FM occupies most of the sampled band; pass what fits below Nyquist
+    // and cut adjacent channels. The passband must stay flat through the
+    // chroma upper sideband (3.58 + 1 MHz) — cutting it asymmetrically
+    // cross-talks U/V and desaturates — hence 0.49*rate and the sharper
+    // 47 taps at 10 MSPS.
+    FirFilterC chan_lpf(design_lowpass(std::min(8.0e6, cfg.sample_rate * 0.49),
+                                       cfg.sample_rate, 47));
+    FmDetector fm_det(cfg.sample_rate, cfg.fm_dev_hz, cfg.invert);
+    // Optional post-discriminator real LPF (off by default): cuts
+    // discriminator noise above the video band, e.g. --lpf 4.2e6.
+    const bool use_video_lpf = cfg.video_lpf_hz > 0.0;
+    FirFilterF video_lpf(design_lowpass(
+        use_video_lpf ? std::min(cfg.video_lpf_hz, cfg.sample_rate * 0.45)
+                      : 1.0,
+        cfg.sample_rate, 63));
 
     // Carrier sits at -offset in the IQ band; multiply by e^{+j*2pi*offset*t}
     // to bring it to 0 Hz.
@@ -225,19 +242,13 @@ void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
             std::complex<float> c(
                 static_cast<int8_t>(raw[2 * i]) / 128.0f,
                 static_cast<int8_t>(raw[2 * i + 1]) / 128.0f);
-            iq[i] = dcb.process(c) * mixer.next();
+            iq[i] = dcb.process(c);
         }
-        if (fm && aout) {
-            static thread_local std::vector<float> audio;
-            audio.clear();
-            fm->process(iq.data(), ns, audio);
-            aout->push(audio.data(), audio.size());
-        }
+        if (mix)
+            for (size_t i = 0; i < ns; ++i) iq[i] *= mixer.next();
         chan_lpf.process(iq.data(), iq.data(), ns);
-        if (cfg.detector == Config::Detector::SyncPLL)
-            sync_det.process(iq.data(), comp.data(), ns);
-        else
-            env.process(iq.data(), comp.data(), ns);
+        fm_det.process(iq.data(), comp.data(), ns);
+        if (use_video_lpf) video_lpf.process(comp.data(), comp.data(), ns);
         dec->process(comp.data(), ns);
     }
     g_running.store(false, std::memory_order_relaxed);
@@ -254,11 +265,10 @@ int run_spectrum(const Config& cfg, ISampleSource* src) {
     }
     print_psd(reinterpret_cast<const int8_t*>(buf.data()), got / 2,
               cfg.center_hz(), cfg.sample_rate);
-    std::printf("\nexpect: video carrier at %.3f MHz (-%.1f MHz from center), "
-                "chroma at %.3f MHz, audio at %.3f MHz\n",
-                cfg.video_carrier_hz / 1e6, cfg.offset_hz / 1e6,
-                (cfg.video_carrier_hz + 3.579545e6) / 1e6,
-                (cfg.video_carrier_hz + 4.5e6) / 1e6);
+    std::printf("\nexpect: FM energy roughly centered on %.1f MHz, spread over "
+                "+/-%.1f MHz\n(FM-ATV has no discrete video carrier; a flat "
+                "noise-like hump is a good sign)\n",
+                cfg.video_carrier_hz / 1e6, (cfg.fm_dev_hz + 4.2e6) / 1e6);
     uint64_t clipped = src->clipped_samples();
     if (clipped) std::printf("WARNING: %llu clipped samples - reduce gain\n",
                              static_cast<unsigned long long>(clipped));
@@ -310,19 +320,7 @@ int main(int argc, char** argv) {
     TripleBuffer tb;
     NtscDecoder dec(cfg, tb);
 
-    // FM intercarrier audio (window mode only).
-    std::unique_ptr<FmAudioDemod> fm;
-    SdlAudioOut aout;
-    if (cfg.audio && !cfg.headless) {
-        auto demod = std::make_unique<FmAudioDemod>(cfg.sample_rate, cfg.volume);
-        if (aout.init(static_cast<int>(demod->out_rate())))
-            fm = std::move(demod);
-        else
-            std::fprintf(stderr, "audio device unavailable, continuing muted\n");
-    }
-
-    std::thread dsp(dsp_thread, std::cref(cfg), src.get(), &dec, &rec,
-                    fm.get(), aout.ok() ? &aout : nullptr);
+    std::thread dsp(dsp_thread, std::cref(cfg), src.get(), &dec, &rec);
 
     int rc = 0;
     if (cfg.headless) {
@@ -353,7 +351,7 @@ int main(int argc, char** argv) {
         if (written == 0) rc = 1;
     } else {
         SdlDisplay disp;
-        if (!disp.init("famidec - Famicom RF decoder")) {
+        if (!disp.init("fpvdec - FPV ATV decoder")) {
             std::fprintf(stderr, "SDL init failed\n");
             g_running.store(false);
             dsp.join();
@@ -370,10 +368,8 @@ int main(int argc, char** argv) {
         float fps = 0.0f;
         uint64_t fps_base_frames = 0;
         auto fps_base_time = std::chrono::steady_clock::now();
-        // Nearest VHF channel (real modulators drift a few hundred kHz).
-        int channel = 0;
-        if (std::abs(cfg.video_carrier_hz - 91.25e6) < 3e6) channel = 1;
-        else if (std::abs(cfg.video_carrier_hz - 97.25e6) < 3e6) channel = 2;
+        // Nearest FPV channel name (real VTX drift a few hundred kHz).
+        std::string channel = fpv_nearest_channel(cfg.video_carrier_hz);
         while (g_running.load(std::memory_order_relaxed)) {
             KeyAction act = disp.poll();
             if (act == KeyAction::Quit) break;
@@ -389,7 +385,7 @@ int main(int argc, char** argv) {
                 uint64_t b;
                 if (rec.stop(&p, &b))
                     std::printf(
-                        "saved %s (%.1f MB) - replay: famidec --input file "
+                        "saved %s (%.1f MB) - replay: fpvdec --input file "
                         "--file %s\n",
                         p.c_str(), b / 1e6, p.c_str());
                 else if (rec.start(next_recording_path()))
@@ -406,9 +402,7 @@ int main(int argc, char** argv) {
             if (tune != 0.0 && hackrf) {
                 mcfg.video_carrier_hz += tune;
                 hackrf->set_center_freq(mcfg.center_hz());
-                if (std::abs(mcfg.video_carrier_hz - 91.25e6) < 3e6) channel = 1;
-                else if (std::abs(mcfg.video_carrier_hz - 97.25e6) < 3e6) channel = 2;
-                else channel = 0;
+                channel = fpv_nearest_channel(mcfg.video_carrier_hz);
             }
             if (act == KeyAction::ToggleColor)
                 mcfg.mode = (mcfg.mode == Config::Mode::Color)
@@ -421,7 +415,7 @@ int main(int argc, char** argv) {
             }
             if (act == KeyAction::Screenshot && have_shown) {
                 char path[64];
-                std::snprintf(path, sizeof(path), "famidec_%03d.bmp", shot++);
+                std::snprintf(path, sizeof(path), "fpvdec_%03d.bmp", shot++);
                 disp.screenshot(last_shown, path);
                 std::printf("saved %s\n", path);
             }
@@ -466,9 +460,7 @@ int main(int argc, char** argv) {
                             cfg.sample_rate * 1000.0 +
                         13.0);
             }
-            st.audio_latency_ms = aout.ok() ? aout.queued_ms() : 0.0f;
             st.freq_mhz = cfg.video_carrier_hz / 1e6;
-            st.audio_mhz = (cfg.video_carrier_hz + 4.5e6) / 1e6;
             st.channel = channel;
             disp.render(f, st);
         }
@@ -480,7 +472,7 @@ int main(int argc, char** argv) {
     std::string rec_path;
     uint64_t rec_bytes = 0;
     if (rec.stop(&rec_path, &rec_bytes))
-        std::printf("saved %s (%.1f MB) - replay: famidec --input file --file %s\n",
+        std::printf("saved %s (%.1f MB) - replay: fpvdec --input file --file %s\n",
                     rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());
     return rc;
 }

@@ -18,11 +18,9 @@ struct OsdStats {
     uint64_t frames = 0;
     int lna = 0, vga = 0;
     double freq_mhz = 0.0;      // video carrier
-    double audio_mhz = 0.0;     // FM audio carrier (video +4.5 MHz)
-    int channel = 0;            // 1/2 (nearest VHF channel), 0 = unknown
+    std::string channel;        // nearest FPV channel name e.g. "F4"; "" = ---
     float fps = 0.0f;           // decoded frames per second
     float video_latency_ms = 0.0f;  // capture -> displayed frame
-    float audio_latency_ms = 0.0f;  // queued audio
     bool show_help = false;
     bool crt = false;  // CRT (barrel + scanline + vignette) emulation
     bool recording = false;
