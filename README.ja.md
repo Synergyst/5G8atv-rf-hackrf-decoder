@@ -12,7 +12,7 @@ RFフロントエンドを FM-ATV 用に作り直したものです。
 
 デモ動画(クリックで YouTube 再生):
 
-[![デモ動画](https://img.youtube.com/vi/dDNk-uRtcGw/0.jpg)](https://www.youtube.com/watch?v=dDNk-uRtcGw)
+[![デモ動画](https://img.youtube.com/vi/dDNk-uRtcGw/maxresdefault.jpg)](https://www.youtube.com/watch?v=dDNk-uRtcGw)
 
 実機 25mW Whoop VTX のライブデコード — 左が HackRF One、ノートPC 上で
 fpvdec が動作中(Betaflight OSD が見えます):

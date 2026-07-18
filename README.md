@@ -13,7 +13,7 @@ front-end was rebuilt for FM-ATV.
 
 Demo video (click to watch on YouTube):
 
-[![Demo video](https://img.youtube.com/vi/dDNk-uRtcGw/0.jpg)](https://www.youtube.com/watch?v=dDNk-uRtcGw)
+[![Demo video](https://img.youtube.com/vi/dDNk-uRtcGw/maxresdefault.jpg)](https://www.youtube.com/watch?v=dDNk-uRtcGw)
 
 Live decode of a real 25 mW whoop VTX — HackRF One on the left, fpvdec
 running on the laptop (Betaflight OSD visible):
