@@ -12,9 +12,16 @@ struct Config {
                                         // halves CPU and USB load vs 20 MSPS
     double offset_hz = 0.0;             // no offset tuning: DC spike removed by
                                         // the DcBlocker (band too wide to offset)
-    int lna_gain = 24;         // 0-40, step 8
+    int lna_gain = 40;         // 0-40, step 8. Max: FPV signals are weak
+                               // and the LNA is what buys range (the VGA
+                               // only scales; use --amp for more)
     int vga_gain = 20;         // 0-62, step 2
-    bool amp = false;
+    bool amp = true;           // +14 dB RF preamp; FPV signals are weak
+                               // (--no-amp or the b key to disable)
+    bool gain_auto = true;     // auto LNA/VGA from ADC peak + clip stats;
+                               // manual via --gain manual, explicit
+                               // --lna/--vga, or the l/g keys. The RF amp
+                               // is never auto-switched (intermod risk).
 
     enum class Input { HackRF, File };
     Input input = Input::HackRF;
@@ -28,6 +35,8 @@ struct Config {
     double fm_dev_hz = 5.0e6;       // FM peak deviation (--dev)
     bool invert = false;            // --invert: flip discriminator polarity
                                     // for non-standard VTX
+    bool afc = true;                // auto re-tune onto the VTX center
+                                    // (--no-afc to disable)
     double video_lpf_hz = 0.0;      // post-detector real LPF, 0 = off.
                                     // At 10 MSPS the FM audio subcarrier is
                                     // outside Nyquist, so this is purely an
@@ -46,8 +55,9 @@ struct Config {
     float hue_deg = 0.0f;
 
     // Horizontal overscan crop, fraction of the active line removed from
-    // EACH side. Real TVs hide the edges; 0.047 ~ the NES 256-px picture.
-    float overscan = 0.047f;
+    // EACH side. 0 = show the full active line: FPV cameras put OSD text
+    // right at the edges (TV-style hiding was 0.047).
+    float overscan = 0.0f;
 
     double center_hz() const { return video_carrier_hz + offset_hz; }
 };

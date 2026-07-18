@@ -225,6 +225,12 @@ KeyAction SdlDisplay::poll() {
                     return KeyAction::ToggleCrt;
                 case SDLK_v:
                     return KeyAction::ToggleRecord;
+                case SDLK_a:
+                    return KeyAction::ToggleGainMode;
+                case SDLK_b:
+                    return KeyAction::ToggleAmp;
+                case SDLK_o:
+                    return KeyAction::ToggleOsd;
                 default:
                     break;
             }
@@ -242,38 +248,48 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
         // Superimpose the OSD into the frame itself (inset toward the
         // lower right, like a real TV) so CRT distortion applies to it.
         osd_frame_ = last_frame_;
-        {
+        if (stats.show_osd) {
             // Big green channel readout, top-left (band+channel, e.g. "F4").
             const std::string ch = stats.channel.empty() ? "---" : stats.channel;
             frame_text(osd_frame_, 48, 40, ch, 40, 255, 80, 6);
         }
-        if (stats.recording) {
+        if (stats.show_osd && stats.recording) {
             char recl[16];
             int s = static_cast<int>(stats.rec_seconds);
             std::snprintf(recl, sizeof(recl), "REC %d:%02d", s / 60, s % 60);
             frame_text(osd_frame_, 48, 96, recl, 255, 60, 60, 3);
         }
-        char l1[48], l2[48], l3[48];
-        std::snprintf(l1, sizeof(l1), "V-SYNC:%s H-SYNC:%s %.1fFPS",
-                      stats.vsync_locked ? "OK" : "--",
-                      stats.line_locked ? "OK" : "--", stats.fps);
-        if (stats.channel.empty())
-            std::snprintf(l2, sizeof(l2), "%.0fMHz", stats.freq_mhz);
-        else
-            std::snprintf(l2, sizeof(l2), "%.0fMHz (%s)", stats.freq_mhz,
-                          stats.channel.c_str());
-        std::snprintf(l3, sizeof(l3), "DELAY %.0fms", stats.video_latency_ms);
-        std::string t1(l1), t2(l2), t3(l3);
-        const int right = Frame::kWidth - 28;
-        frame_text(osd_frame_,
-                   right - static_cast<int>(t1.size()) * kCharW, 28, t1, 255,
-                   220, 0);
-        frame_text(osd_frame_,
-                   right - static_cast<int>(t2.size()) * kCharW,
-                   28 + 8 * kFontScale, t2, 255, 220, 0);
-        frame_text(osd_frame_,
-                   right - static_cast<int>(t3.size()) * kCharW,
-                   28 + 16 * kFontScale, t3, 255, 220, 0);
+        // Single status line across the top. Compact: the 640-px frame
+        // fits ~52 characters at this font scale (parentheses are not in
+        // the glyph set, so the channel is space-separated). Frequency is
+        // MHz with two decimals so the AFC-converged value is readable.
+        if (stats.show_osd) {
+        char line[96];
+        int n = std::snprintf(line, sizeof(line), "V:%s H:%s %.2fFPS %.2f",
+                              stats.vsync_locked ? "OK" : "--",
+                              stats.line_locked ? "OK" : "--", stats.fps,
+                              stats.freq_mhz);
+        if (!stats.channel.empty() && n < static_cast<int>(sizeof(line)))
+            n += std::snprintf(line + n, sizeof(line) - n, " %s",
+                               stats.channel.c_str());
+        if (n < static_cast<int>(sizeof(line)))
+            n += std::snprintf(line + n, sizeof(line) - n,
+                               " %.0fMS %s L%d V%d%s",
+                               stats.video_latency_ms,
+                               stats.gain_auto ? "AUTO" : "MAN", stats.lna,
+                               stats.vga, stats.amp ? " AMP" : "");
+        std::string t(line);
+        int x = (Frame::kWidth - static_cast<int>(t.size()) * kCharW) / 2;
+        if (x < 4) x = 4;
+        frame_text(osd_frame_, x, 28, t, 255, 220, 0);
+        if (stats.clipping) {
+            const std::string clip = "CLIP";
+            frame_text(osd_frame_,
+                       Frame::kWidth - 28 -
+                           static_cast<int>(clip.size()) * kCharW,
+                       28 + 9 * kFontScale, clip, 255, 60, 60);
+        }
+        }  // stats.show_osd
         if (stats.crt) {
             apply_crt(osd_frame_, crt_frame_);
             SDL_UpdateTexture(tex_, nullptr, crt_frame_.rgba.data(),
@@ -290,11 +306,14 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
         static const char* kHelp[] = {
             "KEYS",
             "Q ESC   QUIT",
-            "L       LNA GAIN UP",
-            "SHIFT L LNA GAIN DOWN",
-            "G       VGA GAIN UP",
-            "SHIFT G VGA GAIN DOWN",
+            "A       GAIN AUTO - MANUAL",
+            "L       LNA UP   (MANUAL)",
+            "SHIFT L LNA DOWN (MANUAL)",
+            "G       VGA UP   (MANUAL)",
+            "SHIFT G VGA DOWN (MANUAL)",
+            "B       RF AMP ON - OFF",
             "C       COLOR - GRAY",
+            "O       OSD ON - OFF",
             "S       SCREENSHOT",
             "H       HELP ON - OFF",
             "LEFT RIGHT  TUNE 50KHZ",

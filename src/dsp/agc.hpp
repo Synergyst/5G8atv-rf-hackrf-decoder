@@ -81,6 +81,21 @@ public:
     float tip() const { return tip_; }
     float blank() const { return blank_; }
 
+    // Shift both levels by a known raw offset (feed-forward for AFC
+    // re-tunes: in FM the composite DC moves by exactly delta_f/dev, and
+    // per-line refinement can't follow a step that breaks sync slicing).
+    void shift(float d) {
+        tip_ += d;
+        blank_ += d;
+    }
+
+    // Forget the level estimates and bootstrap again from the signal.
+    void reset() {
+        seeded_ = false;
+        boot_count_ = 0;
+        reservoir_.clear();
+    }
+
 private:
     float tip_ = 1.0f;
     float blank_ = 0.7f;

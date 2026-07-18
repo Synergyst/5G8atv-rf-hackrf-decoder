@@ -12,6 +12,14 @@ constexpr float kSyncSliceIre = -20.0f;   // 50% of sync amplitude
 constexpr float kMinBurstAmp = 3.0f;      // IRE; below this, decode gray
 }  // namespace
 
+// Chroma bandpass half-width at this sample rate: nominally +-1 MHz around
+// the subcarrier, shrunk when Nyquist gets close (low --rate). Below a
+// usable width, color is off entirely (the caller sees width 0).
+static double chroma_half_bw(double fs) {
+    double half = std::min(1.0e6, fs / 2.0 - NtscDecoder::kFsc - 0.05e6);
+    return half >= 0.2e6 ? half : 0.0;
+}
+
 NtscDecoder::NtscDecoder(const Config& cfg, TripleBuffer& out)
     : cfg_(cfg),
       tb_(out),
@@ -19,10 +27,17 @@ NtscDecoder::NtscDecoder(const Config& cfg, TripleBuffer& out)
       nominal_period_(cfg.sample_rate / kLineRate),
       omega_sc_(2.0 * M_PI * kFsc / cfg.sample_rate),
       samples_per_us_(static_cast<int>(cfg.sample_rate / 1e6)),
-      chroma_bpf_(design_bandpass(kFsc - 1.0e6, kFsc + 1.0e6, cfg.sample_rate, 41)),
+      chroma_ok_(chroma_half_bw(cfg.sample_rate) > 0.0),
+      chroma_bpf_(chroma_ok_
+                      ? design_bandpass(kFsc - chroma_half_bw(cfg.sample_rate),
+                                        kFsc + chroma_half_bw(cfg.sample_rate),
+                                        cfg.sample_rate, 41)
+                      : std::vector<float>{1.0f}),
+      sync_lpf_(design_lowpass(1.0e6, cfg.sample_rate, 31)),
       uv_taps_(design_lowpass(0.6e6, cfg.sample_rate, 31)) {
     pll_.init(nominal_period_);
     chroma_delay_ = static_cast<int64_t>(chroma_bpf_.delay());
+    sync_delay_ = static_cast<int64_t>(sync_lpf_.delay());
     uv_delay_ = static_cast<int>((uv_taps_.size() - 1) / 2);
     if (!cfg.dump_composite_path.empty())
         dump_fp_ = std::fopen(cfg.dump_composite_path.c_str(), "wb");
@@ -49,6 +64,9 @@ float NtscDecoder::chroma_frac(double abs) const {
 }
 
 void NtscDecoder::process(const float* raw, size_t n) {
+    // Apply any feed-forward level shift (AFC re-tune) before decoding.
+    float shift = pending_shift_.exchange(0.0f, std::memory_order_relaxed);
+    if (shift != 0.0f) agc_.shift(shift);
     // Store RAW envelope; conversion to IRE happens at access time with the
     // current AGC state. (Storing converted values makes the per-line AGC
     // feedback act on stale mappings a whole block late — unstable.)
@@ -64,11 +82,21 @@ void NtscDecoder::process(const float* raw, size_t n) {
         std::fwrite(tmp.data(), sizeof(float), n, dump_fp_);
     }
     chromab_.resize(old + n);
-    chroma_bpf_.process(comp_.data() + old, chromab_.data() + old, n);
+    if (chroma_ok_)
+        chroma_bpf_.process(comp_.data() + old, chromab_.data() + old, n);
+    else
+        // Chroma exceeds Nyquist at this rate: zeros make the burst
+        // measurement invalid, which selects the gray decode path.
+        std::fill(chromab_.begin() + static_cast<long>(old), chromab_.end(),
+                  0.0f);
+    syncb_.resize(old + n);
+    sync_lpf_.process(comp_.data() + old, syncb_.data() + old, n);
 
     stats_.samples_in.store(static_cast<uint64_t>(comp_end()),
                             std::memory_order_relaxed);
     if (agc_.seeded()) decode_lines();
+    stats_.agc_tip_raw.store(agc_.tip(), std::memory_order_relaxed);
+    stats_.agc_blank_raw.store(agc_.blank(), std::memory_order_relaxed);
     trim_buffers();
 }
 
@@ -79,7 +107,7 @@ bool NtscDecoder::find_hsync_edge(double lo, double hi, double* edge_out,
     int64_t start = std::max(static_cast<int64_t>(lo), base_ + 1);
     int64_t end = std::min(static_cast<int64_t>(hi), comp_end() - 8 * samples_per_us_);
     for (int64_t j = start; j < end; ++j) {
-        if (ire(j - 1) >= kSyncSliceIre && ire(j) < kSyncSliceIre) {
+        if (ire_s(j - 1) >= kSyncSliceIre && ire_s(j) < kSyncSliceIre) {
             // Noise-tolerant pulse qualification. Fraction counts instead of
             // one contiguous run, so a noise spike inside the pulse cannot
             // split it — but anchored: chroma of bright saturated video dips
@@ -91,15 +119,20 @@ bool NtscDecoder::find_hsync_edge(double lo, double hi, double* edge_out,
             //  - width: a 6 us window must hold 3..5.5 us of asserted
             //    samples (hsync is 4.7 us; equalizing pulses ~2.3 us fail
             //    the minimum, vsync broad pulses fail the maximum).
+            // Anchor window starts 0.5 us in: the sync-path LPF slows the
+            // edge, and samples still in transit sit near the slice level
+            // where noise flips them.
+            const int64_t anchor_skip = samples_per_us_ / 2;
             const int64_t anchor_n = 2 * samples_per_us_;
             int64_t a_cnt = 0;
-            for (int64_t m = j; m < j + anchor_n; ++m)
-                if (ire(m) < kSyncSliceIre) ++a_cnt;
+            for (int64_t m = j + anchor_skip; m < j + anchor_skip + anchor_n;
+                 ++m)
+                if (ire_s(m) < kSyncSliceIre) ++a_cnt;
             if (10 * a_cnt < 9 * anchor_n) continue;
             int64_t maxw = j + 6 * samples_per_us_;
-            int64_t w = a_cnt;
-            for (int64_t m = j + anchor_n; m < maxw; ++m)
-                if (ire(m) < kSyncSliceIre) ++w;
+            int64_t w = 0;
+            for (int64_t m = j; m < maxw; ++m)
+                if (ire_s(m) < kSyncSliceIre) ++w;
             if (w < 3 * samples_per_us_ || w > 11 * samples_per_us_ / 2) {
 #ifdef SYNC_DEBUG
                 std::fprintf(stderr, "reject j=%lld w=%lld\n",
@@ -116,7 +149,7 @@ bool NtscDecoder::find_hsync_edge(double lo, double hi, double* edge_out,
                          static_cast<long long>(w));
 #endif
             // sub-sample interpolation of the threshold crossing
-            float a = ire(j - 1), b = ire(j);
+            float a = ire_s(j - 1), b = ire_s(j);
             double frac = (a - kSyncSliceIre) / (a - b);
             *edge_out = static_cast<double>(j - 1) + frac;
             if (pulse_begin) *pulse_begin = j;
@@ -141,10 +174,19 @@ void NtscDecoder::decode_lines() {
                                  &edge)) {
                 // No sync anywhere in this line's worth of samples: paint it
                 // as free-running "snow" so an unlocked signal is visible.
+                // If this keeps happening the AGC level estimates may be
+                // stale (they only refine on found edges, so a level jump
+                // can deadlock them) — re-bootstrap from the signal.
+                if (++search_misses_ > 2000) {
+                    search_misses_ = 0;
+                    agc_.reset();
+                    return;  // process() bootstraps until seeded again
+                }
                 freerun_line(cursor_);
                 cursor_ += static_cast<int64_t>(nominal_period_);
                 continue;
             }
+            search_misses_ = 0;
             cursor_ = static_cast<int64_t>(edge) + 30 * samples_per_us_;
             if (search_prev_edge_ >= 0.0) {
                 double interval = edge - search_prev_edge_;
@@ -242,7 +284,7 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
     // asserted fraction.
     int64_t asserted = 0;
     for (int64_t j = e; j < e + period_i; ++j)
-        if (ire(j) < kSyncSliceIre) ++asserted;
+        if (ire_s(j) < kSyncSliceIre) ++asserted;
     bool is_vsync_line =
         asserted > static_cast<int64_t>(0.45 * static_cast<double>(period_i));
 
@@ -286,13 +328,13 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
         float tip = 0.0f;
         int tn = 0;
         for (int64_t j = pulse_begin_ + w / 4; j < pulse_end_ - w / 4; ++j, ++tn)
-            tip += ire(j);
+            tip += ire_s(j);
         tip /= static_cast<float>(tn);
         float blank = 0.0f;
         int n = 0;
         for (int64_t j = e + 82 * samples_per_us_ / 10;
              j < e + 92 * samples_per_us_ / 10; ++j, ++n)
-            blank += ire(j);
+            blank += ire_s(j);
         blank /= static_cast<float>(n);
         agc_.update_from_ire(tip, blank);
     }
@@ -428,6 +470,7 @@ void NtscDecoder::trim_buffers() {
     if (drop < 32768 || drop > comp_.size()) return;
     comp_.erase(comp_.begin(), comp_.begin() + static_cast<long>(drop));
     chromab_.erase(chromab_.begin(), chromab_.begin() + static_cast<long>(drop));
+    syncb_.erase(syncb_.begin(), syncb_.begin() + static_cast<long>(drop));
     base_ += static_cast<int64_t>(drop);
 }
 

@@ -34,8 +34,13 @@ public:
 
     bool set_gains(int lna, int vga);
     bool set_center_freq(double center_hz);
+    bool set_amp(bool on);
     int lna() const { return lna_; }
     int vga() const { return vga_; }
+
+    // Peak |sample| (0..127) observed since the last call; resets on read.
+    // Fed by the same strided scan as the clip counter, for the gain AGC.
+    int take_peak() { return peak_.exchange(0, std::memory_order_relaxed); }
 
     const std::string& error() const { return error_; }
 
@@ -48,6 +53,7 @@ private:
     std::atomic<uint64_t> dropped_{0};
     std::atomic<uint64_t> total_{0};
     std::atomic<uint64_t> clipped_{0};
+    std::atomic<int> peak_{0};
     std::atomic<bool> running_{false};
     int lna_, vga_;
     std::string error_;

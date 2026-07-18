@@ -24,6 +24,11 @@ public:
     struct Stats {
         std::atomic<bool> line_locked{false};
         std::atomic<float> burst_amp{0.0f};
+        // Raw (pre-IRE) AGC levels. For the FM path these are direct
+        // frequency measurements (freq = -raw * dev, or +raw with --invert),
+        // which is what the AFC uses to find the carrier offset.
+        std::atomic<float> agc_tip_raw{0.0f};
+        std::atomic<float> agc_blank_raw{0.0f};
         std::atomic<uint64_t> frames{0};
         std::atomic<uint64_t> lines{0};
         std::atomic<uint64_t> lines_coasted{0};
@@ -41,6 +46,15 @@ public:
 
     // Feed raw detected envelope samples.
     void process(const float* raw, size_t n);
+
+    // Thread-safe feed-forward of a known composite level shift (AFC
+    // re-tune); applied on the DSP thread at the next process() call.
+    void shift_levels(float delta_raw) {
+        float cur = pending_shift_.load(std::memory_order_relaxed);
+        while (!pending_shift_.compare_exchange_weak(
+            cur, cur + delta_raw, std::memory_order_relaxed)) {
+        }
+    }
 
     const Stats& stats() const { return stats_; }
 
@@ -61,6 +75,15 @@ private:
     // the affine raw->IRE map is a pure scale (the offset is DC-rejected).
     float ire(int64_t abs) const {
         return agc_.to_ire(comp_[static_cast<size_t>(abs - base_)]);
+    }
+    // Sync-path IRE: same composite through a ~1 MHz LPF (delay
+    // compensated). Sync pulses carry no detail above that, so slicing on
+    // the narrow stream cuts ~7 dB of noise power — the difference between
+    // holding and losing lock on a weak signal. Video decoding keeps the
+    // full-bandwidth ire().
+    float ire_s(int64_t abs) const {
+        return agc_.to_ire(
+            syncb_[static_cast<size_t>(abs - base_ + sync_delay_)]);
     }
     float ire_frac(double abs) const;
     float chroma_at(int64_t abs) const {
@@ -84,12 +107,17 @@ private:
     LinePll pll_;
     State state_ = State::Search;
 
-    // Composite (IRE) and chroma bandpass streams, absolute-indexed.
+    // Composite (IRE), chroma bandpass and sync lowpass streams,
+    // absolute-indexed.
     std::vector<float> comp_;
     std::vector<float> chromab_;
+    std::vector<float> syncb_;
     int64_t base_ = 0;
     int64_t chroma_delay_;
+    int64_t sync_delay_;
+    bool chroma_ok_;  // false when --rate puts chroma past Nyquist
     FirFilterF chroma_bpf_;
+    FirFilterF sync_lpf_;
     std::vector<float> uv_taps_;
     int uv_delay_;
 
@@ -97,6 +125,8 @@ private:
     double search_prev_edge_ = -1.0;
     int64_t cursor_ = 0;
     int freerun_row_ = 0;  // "snow" rows painted while unlocked
+    int search_misses_ = 0;  // consecutive lines with no sync found
+    std::atomic<float> pending_shift_{0.0f};
 
     // Extent of the most recently found hsync pulse (slicer-asserted range).
     int64_t pulse_begin_ = 0;

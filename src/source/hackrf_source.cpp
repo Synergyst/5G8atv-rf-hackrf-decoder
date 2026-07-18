@@ -21,13 +21,21 @@ int HackRfSource::rx_callback(hackrf_transfer* transfer) {
     if (!self->running_.load(std::memory_order_relaxed)) return -1;
     const uint8_t* data = transfer->buffer;
     size_t len = static_cast<size_t>(transfer->valid_length);
-    // Cheap clip detection on a stride to keep the USB thread light.
+    // Cheap clip + peak detection on a stride to keep the USB thread light.
     uint64_t clips = 0;
+    int mx = 0;
     for (size_t i = 0; i < len; i += 64) {
-        int8_t v = static_cast<int8_t>(data[i]);
-        if (v >= 127 || v <= -127) ++clips;
+        int v = static_cast<int8_t>(data[i]);
+        if (v < 0) v = -v;
+        if (v > mx) mx = v;
+        if (v >= 127) ++clips;
     }
     if (clips) self->clipped_.fetch_add(clips, std::memory_order_relaxed);
+    int cur = self->peak_.load(std::memory_order_relaxed);
+    while (mx > cur &&
+           !self->peak_.compare_exchange_weak(cur, mx,
+                                              std::memory_order_relaxed)) {
+    }
     self->total_.fetch_add(len, std::memory_order_relaxed);
     if (!self->ring_.push(data, len))
         self->dropped_.fetch_add(len, std::memory_order_relaxed);
@@ -98,6 +106,11 @@ bool HackRfSource::set_center_freq(double center_hz) {
     if (!dev_) return false;
     return hackrf_set_freq(dev_, static_cast<uint64_t>(center_hz)) ==
            HACKRF_SUCCESS;
+}
+
+bool HackRfSource::set_amp(bool on) {
+    if (!dev_) return false;
+    return hackrf_set_amp_enable(dev_, on ? 1 : 0) == HACKRF_SUCCESS;
 }
 
 bool HackRfSource::set_gains(int lna, int vga) {
