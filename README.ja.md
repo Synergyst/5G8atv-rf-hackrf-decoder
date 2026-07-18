@@ -10,13 +10,14 @@ libhackrf + SDL2。GNU Radio 不要。
 (ファミコンVHF RFデコーダ)からのフォークで、NTSCデコーダ部を継承し、
 RFフロントエンドを FM-ATV 用に作り直したものです。
 
-実機 25mW VTX のライブデコード(Betaflight OSD が見えます):
+デモ動画(クリックで YouTube 再生):
 
-![FPV decode](docs/fpv-decode.png)
+[![デモ動画](https://img.youtube.com/vi/dDNk-uRtcGw/0.jpg)](https://www.youtube.com/watch?v=dDNk-uRtcGw)
 
-合成カラーバーのゴールデンテスト出力:
+実機 25mW Whoop VTX のライブデコード — 左が HackRF One、ノートPC 上で
+fpvdec が動作中(Betaflight OSD が見えます):
 
-![color bars](docs/colorbars.png)
+![セットアップ: HackRF One + Whoop + fpvdec ライブデコード](docs/IMG_9715.jpeg)
 
 ## 対応チャンネル
 

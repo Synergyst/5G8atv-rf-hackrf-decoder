@@ -11,13 +11,14 @@ Forked from
 (a Famicom VHF RF decoder); the NTSC decoder core is inherited, the RF
 front-end was rebuilt for FM-ATV.
 
-Live decode of a real 25 mW VTX (Betaflight OSD visible):
+Demo video (click to watch on YouTube):
 
-![FPV decode](docs/fpv-decode.png)
+[![Demo video](https://img.youtube.com/vi/dDNk-uRtcGw/0.jpg)](https://www.youtube.com/watch?v=dDNk-uRtcGw)
 
-Synthetic color-bar golden test output:
+Live decode of a real 25 mW whoop VTX — HackRF One on the left, fpvdec
+running on the laptop (Betaflight OSD visible):
 
-![color bars](docs/colorbars.png)
+![Setup: HackRF One + whoop + fpvdec live decode](docs/IMG_9715.jpeg)
 
 ## Supported channels
 
