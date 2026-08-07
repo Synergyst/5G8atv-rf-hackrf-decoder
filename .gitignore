@@ -5,4 +5,5 @@ third_party/
 *.ppm
 *.bmp
 *.f32
+*.ini
 .DS_Store
