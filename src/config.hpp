@@ -62,6 +62,10 @@ struct Config {
     enum class GuiMode { ImGui, Sdl };
     GuiMode gui_mode = GuiMode::ImGui;
 
+    // CLKIN / CLKOUT (GPSDO support)
+    bool clkout = true;    // enable 10 MHz clock output (default: on)
+    bool enforce_clkin = false;  // require external CLKIN lock at startup
+
     double center_hz() const { return video_carrier_hz + offset_hz; }
 };
 

@@ -65,6 +65,9 @@ bool HackRfSource::start() {
     hackrf_set_amp_enable(dev_, cfg_.amp ? 1 : 0);
     hackrf_set_lna_gain(dev_, static_cast<uint32_t>(lna_));
     hackrf_set_vga_gain(dev_, static_cast<uint32_t>(vga_));
+    // Always enable CLKOUT by default (10 MHz clock output for GPSDO)
+    if (cfg_.clkout)
+        hackrf_set_clkout_enable(dev_, 1);
     running_.store(true, std::memory_order_relaxed);
     r = hackrf_start_rx(dev_, rx_callback, this);
     if (r != HACKRF_SUCCESS) {
@@ -121,6 +124,18 @@ bool HackRfSource::set_gains(int lna, int vga) {
                HACKRF_SUCCESS &&
            hackrf_set_vga_gain(dev_, static_cast<uint32_t>(vga_)) ==
                HACKRF_SUCCESS;
+}
+
+bool HackRfSource::check_clkin() const {
+    if (!dev_) return false;
+    uint8_t status = 0;
+    int r = hackrf_get_clkin_status(dev_, &status);
+    return (r == HACKRF_SUCCESS && status != 0);
+}
+
+bool HackRfSource::set_clkout(bool on) {
+    if (!dev_) return false;
+    return hackrf_set_clkout_enable(dev_, on ? 1 : 0) == HACKRF_SUCCESS;
 }
 
 }  // namespace famidec

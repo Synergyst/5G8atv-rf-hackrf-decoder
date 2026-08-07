@@ -195,6 +195,10 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
             char line[128];
             int n = std::snprintf(line, sizeof(line), "V:%s H:%s %.2fFPS %.2f",
                                   stats.vsync_locked ? "OK" : "--", stats.line_locked ? "OK" : "--", stats.fps, stats.freq_mhz);
+            // Add CLKIN status to status line
+            if (!stats.channel.empty() && n < static_cast<int>(sizeof(line)) - 20) {
+                n += std::snprintf(line + n, sizeof(line) - n, " CLKIN:%s", stats.clkin_locked ? "LOCK" : "----");
+            }
             if (!stats.channel.empty() && n < static_cast<int>(sizeof(line)))
                 n += std::snprintf(line + n, sizeof(line) - n, " %s", stats.channel.c_str());
             if (n < static_cast<int>(sizeof(line)))

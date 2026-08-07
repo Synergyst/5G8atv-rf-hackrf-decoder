@@ -104,6 +104,11 @@ void GuiManager::render_control_panel(const OsdStats& stats) {
         }
     }
 
+    // -- CLKIN Status (GPSDO) --
+    if (stats.clkin_locked) {
+        ImGui::TextColored(ImVec4(0.0f, 0.8f, 0.0f, 1.0f), "CLKIN: LOCKED");
+    }
+
     // -- Stats --
     char stats_label[128];
     std::snprintf(stats_label, sizeof(stats_label),

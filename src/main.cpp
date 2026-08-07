@@ -62,6 +62,8 @@ void usage() {
         "  --frames N            number of frames for --dump-frames (default 30)\n"
         "  --spectrum            print PSD and exit (no video)\n"
         "  --gui imgui|sdl       GUI mode: imgui (default, no hotkeys) or sdl (hotkeys)\n"
+        "  --enforce-clkin       require external CLKIN lock at startup\n"
+        "  --no-clkout           disable CLKOUT (default: 10 MHz output on)\n"
         "\nkeys (SDL mode only): q/ESC quit, a gain auto/manual, l/L LNA, g/G VGA, b RF amp,\n"
         "      c color, o OSD on/off, s screenshot, h help,\n"
         "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ\n");
@@ -125,7 +127,8 @@ bool parse_args(int argc, char** argv, Config* cfg) {
             if (v == "imgui") cfg->gui_mode = Config::GuiMode::ImGui;
             else if (v == "sdl") cfg->gui_mode = Config::GuiMode::Sdl;
             else { std::fprintf(stderr, "gui mode must be imgui|sdl\n"); return false; }
-        }
+        } else if (a == "--enforce-clkin") cfg->enforce_clkin = true;
+        else if (a == "--no-clkout") cfg->clkout = false;
         else if (a == "--help" || a == "-h") { usage(); std::exit(0); }
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return false; }
     }
@@ -299,6 +302,17 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "failed to start input source%s%s\n", hackrf ? ": " : "", hackrf ? hackrf->error().c_str() : "");
         return 1;
     }
+    // CLKIN check: if enforcement is requested, verify external clock is locked
+    if (cfg.enforce_clkin && hackrf && !hackrf->check_clkin()) {
+        std::fprintf(stderr, "ERROR: --enforce-clkin requires external CLKIN lock. "
+                           "Is the GPSDO connected and outputting 10 MHz?\n");
+        return 1;
+    }
+    if (hackrf) {
+        std::printf("CLKIN: %s%s\n",
+                    hackrf->check_clkin() ? "locked (external clock)" : "unlocked (internal oscillator)",
+                    cfg.enforce_clkin && hackrf->check_clkin() ? " [enforced]" : "");
+    }
     std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", cfg.input == Config::Input::HackRF ? "HackRF" : cfg.file_path.c_str(), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
 
     if (cfg.spectrum) {
@@ -441,6 +455,7 @@ int main(int argc, char** argv) {
             if (hackrf) { st.lna = hackrf->lna(); st.vga = hackrf->vga(); }
             st.amp = mcfg.amp;
             st.gain_auto = mcfg.gain_auto;
+            st.clkin_locked = hackrf ? hackrf->check_clkin() : false;
             auto now = std::chrono::steady_clock::now();
             if (st.clipped > last_clip_count) { last_clip_count = st.clipped; last_clip_seen = now; }
             st.clipping = (now - last_clip_seen) < std::chrono::seconds(1);

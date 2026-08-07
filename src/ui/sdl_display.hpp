@@ -20,6 +20,7 @@ struct OsdStats {
     bool amp = false;
     bool gain_auto = true;
     bool clipping = false;
+    bool clkin_locked = false;  // external clock signal detected
     double freq_mhz = 0.0;
     std::string channel;
     float fps = 0.0f;
