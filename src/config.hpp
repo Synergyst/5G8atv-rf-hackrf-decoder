@@ -66,6 +66,17 @@ struct Config {
     bool clkout = true;    // enable 10 MHz clock output (default: on)
     bool enforce_clkin = false;  // require external CLKIN lock at startup
 
+    // Overlay / OSD customization (ImGui GUI)
+    int overlay_font_size = 14;       // default font size (default: 14)
+    bool overlay_bold = false;        // use bold font weight (default: off)
+    float overlay_color_r = -1.0f;    // R component, -1 = semantic colors
+    float overlay_color_g = -1.0f;    // G component, -1 = semantic colors
+    float overlay_color_b = -1.0f;    // B component, -1 = semantic colors
+    int overlay_margin_x = 8;         // horizontal margin from edge (default: 8)
+    int overlay_margin_y = 8;         // vertical margin from edge (default: 8)
+    enum class OverlayPos { Top, Bottom };
+    OverlayPos overlay_position = OverlayPos::Top;  // top or bottom (default: top)
+
     double center_hz() const { return video_carrier_hz + offset_hz; }
 };
 

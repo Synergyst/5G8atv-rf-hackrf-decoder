@@ -64,6 +64,12 @@ void usage() {
         "  --gui imgui|sdl       GUI mode: imgui (default, no hotkeys) or sdl (hotkeys)\n"
         "  --enforce-clkin       require external CLKIN lock at startup\n"
         "  --no-clkout           disable CLKOUT (default: 10 MHz output on)\n"
+        "\nImGui overlay options:\n"
+        "  --overlay-font N      font size (default 14)\n"
+        "  --overlay-color R,G,B RGB color 0.0..1.0 (default: semantic colors)\n"
+        "  --overlay-margin X,Y  X and Y margin in pixels (default 8)\n"
+        "  --overlay-top         position overlay at top (default)\n"
+        "  --overlay-bottom      position overlay at bottom\n"
         "\nkeys (SDL mode only): q/ESC quit, a gain auto/manual, l/L LNA, g/G VGA, b RF amp,\n"
         "      c color, o OSD on/off, s screenshot, h help,\n"
         "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ\n");
@@ -129,6 +135,42 @@ bool parse_args(int argc, char** argv, Config* cfg) {
             else { std::fprintf(stderr, "gui mode must be imgui|sdl\n"); return false; }
         } else if (a == "--enforce-clkin") cfg->enforce_clkin = true;
         else if (a == "--no-clkout") cfg->clkout = false;
+        else if (a == "--overlay-font") cfg->overlay_font_size = std::atoi(next("--overlay-font"));
+        else if (a == "--overlay-color") {
+            std::string v = next("--overlay-color");
+            // Parse "R,G,B" format
+            char *end;
+            float r = std::strtof(v.c_str(), &end);
+            if (*end != ',') {
+                std::fprintf(stderr, "--overlay-color: expected R,G,B format\n");
+                return false;
+            }
+            float g = std::strtof(end + 1, &end);
+            if (*end != ',') {
+                std::fprintf(stderr, "--overlay-color: expected R,G,B format\n");
+                return false;
+            }
+            float b = std::strtof(end + 1, &end);
+            if (*end != '\0') {
+                std::fprintf(stderr, "--overlay-color: expected R,G,B format\n");
+                return false;
+            }
+            cfg->overlay_color_r = r;
+            cfg->overlay_color_g = g;
+            cfg->overlay_color_b = b;
+        }
+        else if (a == "--overlay-margin") {
+            std::string v = next("--overlay-margin");
+            // Parse "X,Y" format
+            char *end;
+            cfg->overlay_margin_x = std::atoi(v.c_str());
+            auto comma = v.find(',');
+            if (comma != std::string::npos) {
+                cfg->overlay_margin_y = std::atoi(v.c_str() + comma + 1);
+            }
+        }
+        else if (a == "--overlay-top") cfg->overlay_position = Config::OverlayPos::Top;
+        else if (a == "--overlay-bottom") cfg->overlay_position = Config::OverlayPos::Bottom;
         else if (a == "--help" || a == "-h") { usage(); std::exit(0); }
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return false; }
     }
@@ -370,7 +412,7 @@ int main(int argc, char** argv) {
 
         GuiManager gui;
         if (use_imgui) {
-            gui.init(disp.win(), disp.renderer());
+            gui.init(disp.win(), disp.renderer(), cfg);
             disp.set_hotkeys_enabled(false);
         }
 
