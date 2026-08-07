@@ -229,14 +229,36 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats, void* app_sta
     SDL_RenderClear(ren_);
     SDL_RenderCopy(ren_, tex_, nullptr, nullptr);
     if (stats.show_help && !use_imgui_) {
-        static const char* kHelp[] = { "KEYS", "Q ESC QUIT", "A GAIN AUTO-MAN", "L LNA UP", "SHIFT L LNA DOWN", "G VGA UP", "SHIFT G VGA DOWN", "B RF AMP", "C COLOR", "O OSD", "S SCREENSHOT", "H HELP", "ARROWS TUNE", "R CRT", "V REC" };
-        int bw = 23 * kCharW + 32, bh = 15 * 9 * kFontScale + 32;
+        static const char* kHelp[] = {
+            "KEYS",
+            "Q ESC   QUIT",
+            "A       GAIN AUTO - MANUAL",
+            "L       LNA UP   (MANUAL)",
+            "SHIFT L LNA DOWN (MANUAL)",
+            "G       VGA UP   (MANUAL)",
+            "SHIFT G VGA DOWN (MANUAL)",
+            "B       RF AMP ON - OFF",
+            "C       COLOR - GRAY",
+            "O       OSD ON - OFF",
+            "S       SCREENSHOT",
+            "H       HELP ON - OFF",
+            "LEFT RIGHT  TUNE 50KHZ",
+            "UP DOWN     TUNE 1MHZ",
+            "R       CRT MODE",
+            "V       RECORD IQ START-STOP",
+        };
+        const int n = static_cast<int>(sizeof(kHelp) / sizeof(kHelp[0]));
+        int bw = 23 * kCharW + 32;
+        int bh = n * 9 * kFontScale + 32;
         SDL_Rect box{(Frame::kWidth - bw) / 2, (Frame::kHeight - bh) / 2, bw, bh};
         SDL_SetRenderDrawBlendMode(ren_, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(ren_, 0, 0, 0, 200);
         SDL_RenderFillRect(ren_, &box);
         SDL_SetRenderDrawBlendMode(ren_, SDL_BLENDMODE_NONE);
-        for (int i = 0; i < 15; ++i) draw_text(ren_, box.x + 16, box.y + 16 + i * 9 * kFontScale, kHelp[i], 255, 220, 0);
+        for (int i = 0; i < n; ++i)
+            draw_text(ren_, box.x + 16, box.y + 16 + i * 9 * kFontScale,
+                      kHelp[i], i == 0 ? 255 : 220, i == 0 ? 220 : 220,
+                      i == 0 ? 0 : 220);
     }
     if (use_imgui_) render_imgui(app_state);
     SDL_RenderPresent(ren_);
@@ -246,15 +268,23 @@ void SdlDisplay::render_imgui(void* app_state) {
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
-    ImGui::Begin("Control Panel");
-    if (ImGui::Button("Screenshot")) { /* Handled via KeyAction in main loop */ }
+
+    ImGui::Begin("Control Panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::Text("FPV ATV Decoder");
+    ImGui::Separator();
+    if (ImGui::Button("Screenshot")) {
+        /* Screenshot action - handled via KeyAction in main loop or add direct callback */
+    }
     ImGui::End();
+
     ImGui::Render();
     ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ren_);
 }
 
 bool SdlDisplay::screenshot(const Frame& frame, const std::string& path) {
-    SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormatFrom(const_cast<uint32_t*>(frame.rgba.data()), Frame::kWidth, Frame::kHeight, 32, Frame::kWidth * 4, SDL_PIXELFORMAT_ABGR8888);
+    SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormatFrom(
+        const_cast<uint32_t*>(frame.rgba.data()), Frame::kWidth,
+        Frame::kHeight, 32, Frame::kWidth * 4, SDL_PIXELFORMAT_ABGR8888);
     if (!surf) return false;
     bool ok = SDL_SaveBMP(surf, path.c_str()) == 0;
     SDL_FreeSurface(surf);

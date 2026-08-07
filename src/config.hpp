@@ -59,6 +59,9 @@ struct Config {
     // right at the edges (TV-style hiding was 0.047).
     float overscan = 0.0f;
 
+    enum class GuiMode { ImGui, Sdl };
+    GuiMode gui_mode = GuiMode::ImGui;
+
     double center_hz() const { return video_carrier_hz + offset_hz; }
 };
 

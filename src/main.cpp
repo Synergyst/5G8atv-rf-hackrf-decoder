@@ -60,7 +60,8 @@ void usage() {
         "  --dump-frames PREFIX  write decoded frames as PPM (headless)\n"
         "  --frames N            number of frames for --dump-frames (default 30)\n"
         "  --spectrum            print PSD and exit (no video)\n"
-        "\nkeys: q/ESC quit, a gain auto/manual, l/L LNA, g/G VGA, b RF amp,\n"
+        "  --gui imgui|sdl       GUI mode: imgui (default, no hotkeys) or sdl (hotkeys)\n"
+        "\nkeys (SDL mode only): q/ESC quit, a gain auto/manual, l/L LNA, g/G VGA, b RF amp,\n"
         "      c color, o OSD on/off, s screenshot, h help,\n"
         "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ\n");
 }
@@ -118,6 +119,12 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         else if (a == "--dump-frames") { cfg->dump_frames_prefix = next("--dump-frames"); cfg->headless = true; }
         else if (a == "--frames") cfg->dump_frame_count = std::atoi(next("--frames"));
         else if (a == "--spectrum") cfg->spectrum = true;
+        else if (a == "--gui") {
+            std::string v = next("--gui");
+            if (v == "imgui") cfg->gui_mode = Config::GuiMode::ImGui;
+            else if (v == "sdl") cfg->gui_mode = Config::GuiMode::Sdl;
+            else { std::fprintf(stderr, "gui mode must be imgui|sdl\n"); return false; }
+        }
         else if (a == "--help" || a == "-h") { usage(); std::exit(0); }
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return false; }
     }
@@ -146,9 +153,6 @@ void write_ppm(const Frame& f, const std::string& path) {
 
 std::atomic<bool> g_running{true};
 
-// IQ recorder shared between the DSP thread (writer) and the main loop
-// (start/stop via the V key or --record). Writes are 64 KiB blocks, so a
-// plain mutex is cheap enough.
 class Recorder {
 public:
     bool start(const std::string& path) {
@@ -169,7 +173,6 @@ public:
         bytes_ += n;
     }
 
-    // Returns false if not recording.
     bool stop(std::string* path, uint64_t* bytes) {
         std::lock_guard<std::mutex> lk(mu_);
         if (!fp_) return false;
@@ -188,9 +191,7 @@ public:
     float seconds() {
         std::lock_guard<std::mutex> lk(mu_);
         if (!fp_) return 0.0f;
-        return std::chrono::duration<float>(std::chrono::steady_clock::now() -
-                                            started_)
-            .count();
+        return std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
     }
 
 private:
@@ -215,10 +216,6 @@ std::string next_recording_path() {
     return "fpvdec_rec_overflow.cs8";
 }
 
-// VTX offset from our tuned center: midpoint of the occupied band. The
-// AGC's raw sync-tip / blanking levels are the FM discriminator's output,
-// i.e. direct frequency measurements (freq = -raw * dev; + with --invert).
-// tip..blank spans 40 IRE, white sits 100 IRE above blank.
 double carrier_offset_hz(const NtscDecoder& dec, const Config& cfg) {
     double sgn = cfg.invert ? 1.0 : -1.0;
     double f_tip = sgn * dec.stats().agc_tip_raw.load() * cfg.fm_dev_hz;
@@ -227,69 +224,44 @@ double carrier_offset_hz(const NtscDecoder& dec, const Config& cfg) {
     return 0.5 * (f_tip + f_white);
 }
 
-// cs8 IQ bytes -> complex -> DC block -> [mix carrier to 0 Hz] -> channel
-// LPF -> FM discriminate -> [video LPF] -> NtscDecoder.
-// mean_raw: ~0.1 s EMA of the discriminator output. Its mean is the mean
-// signal frequency, which the coarse AFC uses to find a VTX so far off
-// (cold-start drift is +2..3 MHz) that the decoder cannot lock at all.
 void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
                 Recorder* rec, std::atomic<float>* mean_raw) {
-    constexpr size_t kBlockBytes = 1 << 16;  // 32768 complex samples
+    constexpr size_t kBlockBytes = 1 << 16;
     std::vector<uint8_t> raw(kBlockBytes);
     std::vector<std::complex<float>> iq(kBlockBytes / 2);
     std::vector<float> comp(kBlockBytes / 2);
 
     DcBlocker dcb;
-    // The NCO costs a sin+cos per sample — only run it when actually
-    // offset-tuned (the FPV default is offset 0, carrier at DC).
     const bool mix = cfg.offset_hz != 0.0;
-    Nco mixer(cfg.offset_hz, cfg.sample_rate);  // shift -offset..: see below
-    // FM occupies most of the sampled band; pass what fits below Nyquist
-    // and cut adjacent channels. The passband must stay flat through the
-    // chroma upper sideband (3.58 + 1 MHz) — cutting it asymmetrically
-    // cross-talks U/V and desaturates — hence 0.49*rate and the sharper
-    // 47 taps at 10 MSPS.
-    FirFilterC chan_lpf(design_lowpass(std::min(8.0e6, cfg.sample_rate * 0.49),
-                                       cfg.sample_rate, 47));
+    Nco mixer(cfg.offset_hz, cfg.sample_rate);
+    FirFilterC chan_lpf(design_lowpass(std::min(8.0e6, cfg.sample_rate * 0.49), cfg.sample_rate, 47));
     FmDetector fm_det(cfg.sample_rate, cfg.fm_dev_hz, cfg.invert);
-    // Optional post-discriminator real LPF (off by default): cuts
-    // discriminator noise above the video band, e.g. --lpf 4.2e6.
     const bool use_video_lpf = cfg.video_lpf_hz > 0.0;
-    FirFilterF video_lpf(design_lowpass(
-        use_video_lpf ? std::min(cfg.video_lpf_hz, cfg.sample_rate * 0.45)
-                      : 1.0,
-        cfg.sample_rate, 63));
+    FirFilterF video_lpf(design_lowpass(use_video_lpf ? std::min(cfg.video_lpf_hz, cfg.sample_rate * 0.45) : 1.0, cfg.sample_rate, 63));
 
-    // Carrier sits at -offset in the IQ band; multiply by e^{+j*2pi*offset*t}
-    // to bring it to 0 Hz.
     while (g_running.load(std::memory_order_relaxed)) {
         size_t n = src->read(raw.data(), raw.size());
         if (n == 0) break;
         rec->write(raw.data(), n);
         size_t ns = n / 2;
         for (size_t i = 0; i < ns; ++i) {
-            std::complex<float> c(
-                static_cast<int8_t>(raw[2 * i]) / 128.0f,
-                static_cast<int8_t>(raw[2 * i + 1]) / 128.0f);
+            std::complex<float> c(static_cast<int8_t>(raw[2 * i]) / 128.0f, static_cast<int8_t>(raw[2 * i + 1]) / 128.0f);
             iq[i] = dcb.process(c);
         }
-        if (mix)
-            for (size_t i = 0; i < ns; ++i) iq[i] *= mixer.next();
+        if (mix) for (size_t i = 0; i < ns; ++i) iq[i] *= mixer.next();
         chan_lpf.process(iq.data(), iq.data(), ns);
         fm_det.process(iq.data(), comp.data(), ns);
         if (use_video_lpf) video_lpf.process(comp.data(), comp.data(), ns);
         float sum = 0.0f;
         for (size_t i = 0; i < ns; ++i) sum += comp[i];
         float m = mean_raw->load(std::memory_order_relaxed);
-        mean_raw->store(0.97f * m + 0.03f * (sum / static_cast<float>(ns)),
-                        std::memory_order_relaxed);
+        mean_raw->store(0.97f * m + 0.03f * (sum / static_cast<float>(ns)), std::memory_order_relaxed);
         dec->process(comp.data(), ns);
     }
     g_running.store(false, std::memory_order_relaxed);
 }
 
 int run_spectrum(const Config& cfg, ISampleSource* src) {
-    // Grab ~0.5 s of IQ and print the PSD.
     size_t n_samples = static_cast<size_t>(cfg.sample_rate / 2);
     std::vector<uint8_t> buf(n_samples * 2);
     size_t got = src->read(buf.data(), buf.size());
@@ -297,19 +269,14 @@ int run_spectrum(const Config& cfg, ISampleSource* src) {
         std::fprintf(stderr, "not enough samples for PSD\n");
         return 1;
     }
-    print_psd(reinterpret_cast<const int8_t*>(buf.data()), got / 2,
-              cfg.center_hz(), cfg.sample_rate);
-    std::printf("\nexpect: FM energy roughly centered on %.1f MHz, spread over "
-                "+/-%.1f MHz\n(FM-ATV has no discrete video carrier; a flat "
-                "noise-like hump is a good sign)\n",
-                cfg.video_carrier_hz / 1e6, (cfg.fm_dev_hz + 4.2e6) / 1e6);
+    print_psd(reinterpret_cast<const int8_t*>(buf.data()), got / 2, cfg.center_hz(), cfg.sample_rate);
+    std::printf("\nexpect: FM energy roughly centered on %.1f MHz, spread over +/-%.1f MHz\n", cfg.video_carrier_hz / 1e6, (cfg.fm_dev_hz + 4.2e6) / 1e6);
     uint64_t clipped = src->clipped_samples();
-    if (clipped) std::printf("WARNING: %llu clipped samples - reduce gain\n",
-                             static_cast<unsigned long long>(clipped));
+    if (clipped) std::printf("WARNING: %llu clipped samples - reduce gain\n", static_cast<unsigned long long>(clipped));
     return 0;
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     Config cfg;
@@ -325,29 +292,13 @@ int main(int argc, char** argv) {
         hackrf = h.get();
         src = std::move(h);
     } else {
-        // Pace file playback only when showing a live window.
         src = std::make_unique<FileSource>(cfg, !cfg.headless && !cfg.spectrum);
     }
     if (!src->start()) {
-        std::fprintf(stderr, "failed to start input source%s%s\n",
-                     hackrf ? ": " : "",
-                     hackrf ? hackrf->error().c_str() : "");
+        std::fprintf(stderr, "failed to start input source%s%s\n", hackrf ? ": " : "", hackrf ? hackrf->error().c_str() : "");
         return 1;
     }
-    std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n",
-                cfg.input == Config::Input::HackRF ? "HackRF" : cfg.file_path.c_str(),
-                cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6,
-                cfg.sample_rate / 1e6);
-    {
-        double chalf = std::min(
-            1.0e6, cfg.sample_rate / 2.0 - NtscDecoder::kFsc - 0.05e6);
-        if (chalf < 0.2e6)
-            std::printf("note: chroma is past Nyquist at this rate - "
-                        "grayscale decode\n");
-        else if (chalf < 1.0e6)
-            std::printf("note: chroma bandwidth reduced to +-%.2f MHz at "
-                        "this rate\n", chalf / 1e6);
-    }
+    std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", cfg.input == Config::Input::HackRF ? "HackRF" : cfg.file_path.c_str(), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
 
     if (cfg.spectrum) {
         int rc = run_spectrum(cfg, src.get());
@@ -363,26 +314,20 @@ int main(int argc, char** argv) {
 
     TripleBuffer tb;
     NtscDecoder dec(cfg, tb);
-
     std::atomic<float> mean_raw{0.0f};
-    std::thread dsp(dsp_thread, std::cref(cfg), src.get(), &dec, &rec,
-                    &mean_raw);
+    std::thread dsp(dsp_thread, std::cref(cfg), src.get(), &dec, &rec, &mean_raw);
 
     int rc = 0;
     if (cfg.headless) {
-        // Dump N frames as PPM, then exit.
         uint64_t last_seq = 0;
         int written = 0;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
-        while (written < cfg.dump_frame_count &&
-               g_running.load(std::memory_order_relaxed) &&
-               std::chrono::steady_clock::now() < deadline) {
+        while (written < cfg.dump_frame_count && g_running.load(std::memory_order_relaxed) && std::chrono::steady_clock::now() < deadline) {
             const Frame* f = tb.acquire();
             if (f && f->seq != last_seq) {
                 last_seq = f->seq;
                 char path[512];
-                std::snprintf(path, sizeof(path), "%s%04d.ppm",
-                              cfg.dump_frames_prefix.c_str(), written);
+                std::snprintf(path, sizeof(path), "%s%04d.ppm", cfg.dump_frames_prefix.c_str(), written);
                 write_ppm(*f, path);
                 ++written;
             } else {
@@ -395,18 +340,19 @@ int main(int argc, char** argv) {
                     static_cast<unsigned long long>(dec.stats().lines_coasted.load()),
                     static_cast<unsigned long long>(dec.stats().frames.load()));
         if (dec.stats().line_locked.load())
-            std::printf("carrier offset: %+.2f MHz from tuned center "
-                        "(live AFC would re-tune; or use --freq)\n",
+            std::printf("carrier offset: %+.2f MHz from tuned center (live AFC would re-tune; or use --freq)\n",
                         carrier_offset_hz(dec, cfg) / 1e6);
         if (written == 0) rc = 1;
     } else {
         SdlDisplay disp;
-        if (!disp.init("fpvdec - FPV ATV decoder")) {
+        bool use_imgui = (cfg.gui_mode == Config::GuiMode::ImGui);
+        if (!disp.init("fpvdec - FPV ATV decoder", use_imgui)) {
             std::fprintf(stderr, "SDL init failed\n");
             g_running.store(false);
             dsp.join();
             return 1;
         }
+        disp.set_hotkeys_enabled(!use_imgui);
         Config& mcfg = cfg;
         int shot = 0;
         Frame last_shown;
@@ -416,14 +362,9 @@ int main(int argc, char** argv) {
         bool show_help = false;
         bool crt_mode = false;
         bool show_osd = true;
-        // FPS over a sliding 8..16 s window (two anchors): a ~1 s count
-        // window only resolves +-1 fps, far too coarse to read 59.94.
         float fps = 0.0f;
         auto fps_start = std::chrono::steady_clock::now();
-        struct FpsAnchor {
-            std::chrono::steady_clock::time_point t;
-            uint64_t frames;
-        };
+        struct FpsAnchor { std::chrono::steady_clock::time_point t; uint64_t frames; };
         FpsAnchor fps_prev{fps_start, 0}, fps_cur{fps_start, 0};
         auto last_afc = fps_start;
         auto lock_changed = fps_start;
@@ -432,42 +373,31 @@ int main(int argc, char** argv) {
         auto last_agc = fps_start;
         auto last_clip_seen = fps_start - std::chrono::seconds(10);
         uint64_t last_clip_count = 0;
-        // Nearest FPV channel name (real VTX drift a few hundred kHz).
         std::string channel = fpv_nearest_channel(cfg.video_carrier_hz);
         while (g_running.load(std::memory_order_relaxed)) {
             KeyAction act = disp.poll();
             if (act == KeyAction::Quit) break;
             if (hackrf) {
-                // Any manual gain key also drops out of auto mode.
-                if (act == KeyAction::GainLnaUp || act == KeyAction::GainLnaDown ||
-                    act == KeyAction::GainVgaUp || act == KeyAction::GainVgaDown)
+                if (act == KeyAction::GainLnaUp || act == KeyAction::GainLnaDown || act == KeyAction::GainVgaUp || act == KeyAction::GainVgaDown)
                     mcfg.gain_auto = false;
                 if (act == KeyAction::GainLnaUp) hackrf->set_gains(hackrf->lna() + 8, hackrf->vga());
                 if (act == KeyAction::GainLnaDown) hackrf->set_gains(hackrf->lna() - 8, hackrf->vga());
                 if (act == KeyAction::GainVgaUp) hackrf->set_gains(hackrf->lna(), hackrf->vga() + 2);
                 if (act == KeyAction::GainVgaDown) hackrf->set_gains(hackrf->lna(), hackrf->vga() - 2);
-                if (act == KeyAction::ToggleAmp) {
-                    mcfg.amp = !mcfg.amp;
-                    hackrf->set_amp(mcfg.amp);
-                }
+                if (act == KeyAction::ToggleAmp) { mcfg.amp = !mcfg.amp; hackrf->set_amp(mcfg.amp); }
             }
             if (act == KeyAction::ToggleGainMode) mcfg.gain_auto = !mcfg.gain_auto;
             if (act == KeyAction::ToggleHelp) show_help = !show_help;
             if (act == KeyAction::ToggleOsd) show_osd = !show_osd;
             if (act == KeyAction::ToggleRecord) {
-                std::string p;
-                uint64_t b;
+                std::string p; uint64_t b;
                 if (rec.stop(&p, &b))
-                    std::printf(
-                        "saved %s (%.1f MB) - replay: fpvdec --input file "
-                        "--file %s\n",
-                        p.c_str(), b / 1e6, p.c_str());
+                    std::printf("saved %s (%.1f MB) - replay: fpvdec --input file --file %s\n", p.c_str(), b / 1e6, p.c_str());
                 else if (rec.start(next_recording_path()))
                     std::printf("recording IQ...\n");
                 std::fflush(stdout);
             }
             if (act == KeyAction::ToggleCrt) crt_mode = !crt_mode;
-            // Arrow-key tuning: left/right 50 kHz, up/down 1 MHz.
             double tune = 0.0;
             if (act == KeyAction::FreqUp) tune = 50e3;
             if (act == KeyAction::FreqDown) tune = -50e3;
@@ -479,17 +409,11 @@ int main(int argc, char** argv) {
                 channel = fpv_nearest_channel(mcfg.video_carrier_hz);
             }
             if (act == KeyAction::ToggleColor)
-                mcfg.mode = (mcfg.mode == Config::Mode::Color)
-                                ? Config::Mode::Gray
-                                : Config::Mode::Color;
+                mcfg.mode = (mcfg.mode == Config::Mode::Color) ? Config::Mode::Gray : Config::Mode::Color;
             const Frame* f = tb.acquire();
-            if (f) {
-                last_shown = *f;
-                have_shown = true;
-            }
+            if (f) { last_shown = *f; have_shown = true; }
             if (act == KeyAction::Screenshot && have_shown) {
-                char path[64];
-                std::snprintf(path, sizeof(path), "fpvdec_%03d.bmp", shot++);
+                char path[64]; std::snprintf(path, sizeof(path), "fpvdec_%03d.bmp", shot++);
                 disp.screenshot(last_shown, path);
                 std::printf("saved %s\n", path);
             }
@@ -503,122 +427,59 @@ int main(int argc, char** argv) {
             if (hackrf) { st.lna = hackrf->lna(); st.vga = hackrf->vga(); }
             st.amp = mcfg.amp;
             st.gain_auto = mcfg.gain_auto;
-            // V-SYNC considered locked while real frames keep arriving.
             auto now = std::chrono::steady_clock::now();
-            if (st.clipped > last_clip_count) {
-                last_clip_count = st.clipped;
-                last_clip_seen = now;
-            }
+            if (st.clipped > last_clip_count) { last_clip_count = st.clipped; last_clip_seen = now; }
             st.clipping = (now - last_clip_seen) < std::chrono::seconds(1);
-            // Gain AGC: keep the ADC peak in a healthy window. Decisions use
-            // only the peak measured since the previous tick (a sticky clip
-            // flag here double-penalizes one event into a -12 dB sawtooth).
-            // Down fast when hot, up slowly when weak; VGA first, LNA at
-            // the ends. The RF amp is never auto-switched (intermod risk).
-            if (mcfg.gain_auto && hackrf &&
-                now - last_agc >= std::chrono::milliseconds(500)) {
+            if (mcfg.gain_auto && hackrf && now - last_agc >= std::chrono::milliseconds(500)) {
                 last_agc = now;
                 int peak = hackrf->take_peak();
                 int lna = hackrf->lna(), vga = hackrf->vga();
                 if (peak >= 124) {
-                    // Hard clip: double attack, a saturated front-end takes
-                    // seconds to walk down in 6 dB steps.
                     int down = peak >= 127 ? 12 : 6;
-                    if (vga > 0)
-                        hackrf->set_gains(lna, vga - down);
-                    else if (lna > 0)
-                        hackrf->set_gains(lna - 8, vga);
+                    if (vga > 0) hackrf->set_gains(lna, vga - down);
+                    else if (lna > 0) hackrf->set_gains(lna - 8, vga);
                 } else if (peak > 0 && peak < 64) {
-                    if (vga < 62)
-                        hackrf->set_gains(lna, vga + 2);
-                    else if (lna < 40)
-                        hackrf->set_gains(lna + 8, vga);
+                    if (vga < 62) hackrf->set_gains(lna, vga + 2);
+                    else if (lna < 40) hackrf->set_gains(lna + 8, vga);
                 }
                 if (hackrf->lna() != lna || hackrf->vga() != vga) {
-                    std::printf("AGC: peak %d -> LNA%d VGA%d\n", peak,
-                                hackrf->lna(), hackrf->vga());
+                    std::printf("AGC: peak %d -> LNA%d VGA%d\n", peak, hackrf->lna(), hackrf->vga());
                     std::fflush(stdout);
                 }
             }
-            if (st.frames > prev_frames) {
-                prev_frames = st.frames;
-                last_frame_inc = now;
-            }
+            if (st.frames > prev_frames) { prev_frames = st.frames; last_frame_inc = now; }
             st.vsync_locked = (now - last_frame_inc) < std::chrono::milliseconds(500);
-            if (!st.vsync_locked) {
-                fps = 0.0f;
-                fps_prev = fps_cur = {now, st.frames};
-            } else {
-                if (now - fps_cur.t >= std::chrono::seconds(8)) {
-                    fps_prev = fps_cur;
-                    fps_cur = {now, st.frames};
-                }
-                double win =
-                    std::chrono::duration<double>(now - fps_prev.t).count();
-                if (win >= 1.0)
-                    fps = static_cast<float>(
-                        static_cast<double>(st.frames - fps_prev.frames) / win);
+            if (!st.vsync_locked) { fps = 0.0f; fps_prev = fps_cur = {now, st.frames}; }
+            else {
+                if (now - fps_cur.t >= std::chrono::seconds(8)) { fps_prev = fps_cur; fps_cur = {now, st.frames}; }
+                double win = std::chrono::duration<double>(now - fps_prev.t).count();
+                if (win >= 1.0) fps = static_cast<float>(static_cast<double>(st.frames - fps_prev.frames) / win);
             }
             st.fps = fps;
             st.show_osd = show_osd;
-            // AFC, two stages:
-            //  - locked: the AGC's raw tip/blank levels are direct
-            //    frequency measurements, so the occupied-band midpoint
-            //    gives a precise offset (fine, <=1 MHz steps);
-            //  - unlocked: a VTX starting +2..3 MHz off (cold-start drift)
-            //    pushes video past Nyquist and can never lock, so pull in
-            //    coarsely on the mean discriminator output = mean signal
-            //    frequency (needs no lock; <=2 MHz steps).
-            // Deliberately sluggish: it re-tunes only on the median of 3
-            // consistent measurements taken in a stable lock state that
-            // has held >= 2 s. On a fading marginal signal an eager AFC
-            // chases noise and its own LO glitches make things worse
-            // (rec_005: constant +-1 MHz re-tune staircase while a plain
-            // replay of the same signal decodes fine).
+            // AFC
             {
                 bool locked = st.line_locked && st.vsync_locked;
-                if (locked != was_locked) {
-                    was_locked = locked;
-                    lock_changed = now;
-                    afc_meas.clear();
-                }
-                if (cfg.afc && hackrf &&
-                    now - last_afc >= std::chrono::milliseconds(500) &&
-                    now - lock_changed >= std::chrono::seconds(2)) {
+                if (locked != was_locked) { was_locked = locked; lock_changed = now; afc_meas.clear(); }
+                if (cfg.afc && hackrf && now - last_afc >= std::chrono::milliseconds(500) && now - lock_changed >= std::chrono::seconds(2)) {
                     last_afc = now;
-                    afc_meas.push_back(
-                        locked ? carrier_offset_hz(dec, cfg)
-                               : (cfg.invert ? 1.0 : -1.0) *
-                                     static_cast<double>(mean_raw.load()) *
-                                     cfg.fm_dev_hz);
+                    afc_meas.push_back(locked ? carrier_offset_hz(dec, cfg) :
+                        (cfg.invert ? 1.0 : -1.0) * static_cast<double>(mean_raw.load()) * cfg.fm_dev_hz);
                     if (afc_meas.size() >= 3) {
                         std::sort(afc_meas.begin(), afc_meas.end());
-                        double med = afc_meas[1];
-                        double spread = afc_meas[2] - afc_meas[0];
-                        bool same_sign =
-                            (afc_meas[0] > 0.0) == (afc_meas[2] > 0.0);
+                        double med = afc_meas[1], spread = afc_meas[2] - afc_meas[0];
+                        bool same_sign = (afc_meas[0] > 0.0) == (afc_meas[2] > 0.0);
                         double thresh = locked ? 150e3 : 300e3;
                         double clampv = locked ? 1e6 : 2e6;
                         double max_spread = locked ? 200e3 : 600e3;
                         afc_meas.clear();
-                        if (std::abs(med) > thresh && same_sign &&
-                            spread < max_spread) {
+                        if (std::abs(med) > thresh && same_sign && spread < max_spread) {
                             double step = std::clamp(med, -clampv, clampv);
                             mcfg.video_carrier_hz += step;
                             hackrf->set_center_freq(mcfg.center_hz());
-                            // Feed the level jump forward to the decoder
-                            // AGC: the composite DC moves by exactly
-                            // step/dev, a step the edge-gated per-line
-                            // refinement cannot survive.
-                            dec.shift_levels(static_cast<float>(
-                                (cfg.invert ? -step : step) /
-                                cfg.fm_dev_hz));
-                            channel =
-                                fpv_nearest_channel(mcfg.video_carrier_hz);
-                            std::printf("AFC%s: %+0.2f MHz -> %.2f MHz\n",
-                                        locked ? "" : " (coarse)",
-                                        step / 1e6,
-                                        mcfg.video_carrier_hz / 1e6);
+                            dec.shift_levels(static_cast<float>((cfg.invert ? -step : step) / cfg.fm_dev_hz));
+                            channel = fpv_nearest_channel(mcfg.video_carrier_hz);
+                            std::printf("AFC%s: %+0.2f MHz -> %.2f MHz\n", locked ? "" : " (coarse)", step / 1e6, mcfg.video_carrier_hz / 1e6);
                             std::fflush(stdout);
                         }
                     }
@@ -628,9 +489,6 @@ int main(int argc, char** argv) {
             st.crt = crt_mode;
             st.recording = rec.active();
             st.rec_seconds = rec.seconds();
-            // Video latency: decoder samples since the displayed frame's
-            // vsync (same coordinate system, so input drops don't skew it),
-            // plus the source's unread backlog and ~one USB transfer (13 ms).
             if (st.vsync_locked) {
                 uint64_t dsp_samples = dec.stats().samples_in.load();
                 uint64_t vsync_pos = dec.stats().frame_sample_pos.load();
@@ -638,22 +496,18 @@ int main(int argc, char** argv) {
                     st.video_latency_ms = static_cast<float>(
                         (static_cast<double>(dsp_samples - vsync_pos) +
                          static_cast<double>(src->buffered_bytes()) / 2.0) /
-                            cfg.sample_rate * 1000.0 +
-                        13.0);
+                            cfg.sample_rate * 1000.0 + 13.0);
             }
             st.freq_mhz = cfg.video_carrier_hz / 1e6;
             st.channel = channel;
             disp.render(f, st);
         }
     }
-
     g_running.store(false, std::memory_order_relaxed);
     src->stop();
     dsp.join();
-    std::string rec_path;
-    uint64_t rec_bytes = 0;
+    std::string rec_path; uint64_t rec_bytes = 0;
     if (rec.stop(&rec_path, &rec_bytes))
-        std::printf("saved %s (%.1f MB) - replay: fpvdec --input file --file %s\n",
-                    rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());
+        std::printf("saved %s (%.1f MB) - replay: fpvdec --input file --file %s\n", rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());
     return rc;
 }
