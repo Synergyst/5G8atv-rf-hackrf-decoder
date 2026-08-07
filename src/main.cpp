@@ -23,6 +23,7 @@
 #include "source/hackrf_source.hpp"
 #include "source/sample_source.hpp"
 #include "ui/sdl_display.hpp"
+#include "ui/gui_manager.hpp"
 #include "util/fpv_channels.hpp"
 #include "util/spectrum.hpp"
 
@@ -344,15 +345,21 @@ int main(int argc, char** argv) {
                         carrier_offset_hz(dec, cfg) / 1e6);
         if (written == 0) rc = 1;
     } else {
-        SdlDisplay disp;
         bool use_imgui = (cfg.gui_mode == Config::GuiMode::ImGui);
-        if (!disp.init("fpvdec - FPV ATV decoder", use_imgui)) {
+        SdlDisplay disp;
+        if (!disp.init("fpvdec - FPV ATV decoder")) {
             std::fprintf(stderr, "SDL init failed\n");
             g_running.store(false);
             dsp.join();
             return 1;
         }
-        disp.set_hotkeys_enabled(!use_imgui);
+
+        GuiManager gui;
+        if (use_imgui) {
+            gui.init(disp.win(), disp.renderer());
+            disp.set_hotkeys_enabled(false);
+        }
+
         Config& mcfg = cfg;
         int shot = 0;
         Frame last_shown;
@@ -377,6 +384,8 @@ int main(int argc, char** argv) {
         while (g_running.load(std::memory_order_relaxed)) {
             KeyAction act = disp.poll();
             if (act == KeyAction::Quit) break;
+
+            // Handle hotkey actions first
             if (hackrf) {
                 if (act == KeyAction::GainLnaUp || act == KeyAction::GainLnaDown || act == KeyAction::GainVgaUp || act == KeyAction::GainVgaDown)
                     mcfg.gain_auto = false;
@@ -410,6 +419,8 @@ int main(int argc, char** argv) {
             }
             if (act == KeyAction::ToggleColor)
                 mcfg.mode = (mcfg.mode == Config::Mode::Color) ? Config::Mode::Gray : Config::Mode::Color;
+
+            // Acquire the latest frame
             const Frame* f = tb.acquire();
             if (f) { last_shown = *f; have_shown = true; }
             if (act == KeyAction::Screenshot && have_shown) {
@@ -417,6 +428,8 @@ int main(int argc, char** argv) {
                 disp.screenshot(last_shown, path);
                 std::printf("saved %s\n", path);
             }
+
+            // Build stats from decoder and source
             OsdStats st;
             st.line_locked = dec.stats().line_locked.load();
             st.burst_amp = dec.stats().burst_amp.load();
@@ -424,6 +437,7 @@ int main(int argc, char** argv) {
             st.dropped = src->dropped_bytes();
             st.clipped = src->clipped_samples();
             st.frames = dec.stats().frames.load();
+            st.lines = dec.stats().lines.load();
             if (hackrf) { st.lna = hackrf->lna(); st.vga = hackrf->vga(); }
             st.amp = mcfg.amp;
             st.gain_auto = mcfg.gain_auto;
@@ -500,8 +514,23 @@ int main(int argc, char** argv) {
             }
             st.freq_mhz = cfg.video_carrier_hz / 1e6;
             st.channel = channel;
-            disp.render(f, st);
+
+            // Render
+            float gui_screenshot = 0.0f;
+            if (use_imgui) {
+                disp.render_video_only(f);
+                gui_screenshot = gui.render(st);
+                SDL_RenderPresent(disp.renderer());
+                if (gui_screenshot > 0.0f && have_shown) {
+                    char path[64]; std::snprintf(path, sizeof(path), "fpvdec_%03d.bmp", shot++);
+                    disp.screenshot(last_shown, path);
+                    std::printf("saved %s\n", path);
+                }
+            } else {
+                disp.render(f, st);
+            }
         }
+        if (use_imgui) gui.shutdown();
     }
     g_running.store(false, std::memory_order_relaxed);
     src->stop();

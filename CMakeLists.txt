@@ -49,8 +49,10 @@ add_executable(fpvdec
     src/main.cpp
     src/source/hackrf_source.cpp
     src/ui/sdl_display.cpp
+    src/ui/gui_manager.cpp
 )
-# ImGui
+
+# ImGui (used only by gui_manager, not directly by main)
 set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
 set(IMGUI_SOURCES
     ${IMGUI_DIR}/imgui.cpp
@@ -64,6 +66,7 @@ set(IMGUI_SOURCES
 target_include_directories(fpvdec PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_sources(fpvdec PRIVATE ${IMGUI_SOURCES})
 target_link_libraries(fpvdec PRIVATE fpv_dsp ${HACKRF_TARGET} SDL2::SDL2)
+
 if(WIN32)
     # SDL2's WinMain shim is not used; keep the plain main().
     target_compile_definitions(fpvdec PRIVATE SDL_MAIN_HANDLED)

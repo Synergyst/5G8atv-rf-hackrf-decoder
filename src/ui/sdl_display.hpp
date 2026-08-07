@@ -2,9 +2,6 @@
 
 #include <string>
 #include <SDL2/SDL.h>
-#include <imgui.h>
-#include <imgui_impl_sdl2.h>
-#include <imgui_impl_sdlrenderer2.h>
 
 #include "../dsp/frame.hpp"
 
@@ -18,6 +15,7 @@ struct OsdStats {
     uint64_t dropped = 0;
     uint64_t clipped = 0;
     uint64_t frames = 0;
+    uint64_t lines = 0;
     int lna = 0, vga = 0;
     bool amp = false;
     bool gain_auto = true;
@@ -56,17 +54,19 @@ enum class KeyAction {
 
 class SdlDisplay {
 public:
-    bool init(const std::string& title, bool use_imgui = false);
+    bool init(const std::string& title);
     ~SdlDisplay();
 
     KeyAction poll();
-    void render(const Frame* frame, const OsdStats& stats, void* app_state = nullptr);
+    void render(const Frame* frame, const OsdStats& stats);
+    void render_video_only(const Frame* frame);
     bool screenshot(const Frame& frame, const std::string& path);
     void set_hotkeys_enabled(bool enabled) { hotkeys_enabled_ = enabled; }
 
-private:
-    void render_imgui(void* app_state);
+    SDL_Window* win() const { return win_; }
+    SDL_Renderer* renderer() const { return ren_; }
 
+private:
     SDL_Window* win_ = nullptr;
     SDL_Renderer* ren_ = nullptr;
     SDL_Texture* tex_ = nullptr;
@@ -75,7 +75,6 @@ private:
     Frame crt_frame_;
     bool have_frame_ = false;
     bool hotkeys_enabled_ = true;
-    bool use_imgui_ = false;
 };
 
 } // namespace famidec

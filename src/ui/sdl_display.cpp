@@ -129,9 +129,8 @@ void draw_text(SDL_Renderer* ren, int x, int y, const std::string& text, uint8_t
 
 } // namespace
 
-bool SdlDisplay::init(const std::string& title, bool use_imgui) {
+bool SdlDisplay::init(const std::string& title) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) return false;
-    use_imgui_ = use_imgui;
     win_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, Frame::kWidth, Frame::kHeight, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!win_) return false;
     ren_ = SDL_CreateRenderer(win_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -140,21 +139,10 @@ bool SdlDisplay::init(const std::string& title, bool use_imgui) {
     SDL_RenderSetLogicalSize(ren_, Frame::kWidth, Frame::kHeight);
     tex_ = SDL_CreateTexture(ren_, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, Frame::kWidth, Frame::kHeight);
     if (!tex_) return false;
-    if (use_imgui_) {
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGui_ImplSDL2_InitForSDLRenderer(win_, ren_);
-        ImGui_ImplSDLRenderer2_Init(ren_);
-    }
     return true;
 }
 
 SdlDisplay::~SdlDisplay() {
-    if (use_imgui_) {
-        ImGui_ImplSDLRenderer2_Shutdown();
-        ImGui_ImplSDL2_Shutdown();
-        ImGui::DestroyContext();
-    }
     if (tex_) SDL_DestroyTexture(tex_);
     if (ren_) SDL_DestroyRenderer(ren_);
     if (win_) SDL_DestroyWindow(win_);
@@ -164,7 +152,6 @@ SdlDisplay::~SdlDisplay() {
 KeyAction SdlDisplay::poll() {
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
-        if (use_imgui_) ImGui_ImplSDL2_ProcessEvent(&ev);
         if (ev.type == SDL_QUIT) return KeyAction::Quit;
         if (ev.type == SDL_KEYDOWN) {
             if (!hotkeys_enabled_) continue;
@@ -192,7 +179,7 @@ KeyAction SdlDisplay::poll() {
     return KeyAction::None;
 }
 
-void SdlDisplay::render(const Frame* frame, const OsdStats& stats, void* app_state) {
+void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
     if (frame) { last_frame_ = *frame; have_frame_ = true; }
     if (have_frame_) {
         osd_frame_ = last_frame_;
@@ -200,12 +187,12 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats, void* app_sta
             const std::string ch = stats.channel.empty() ? "--" : stats.channel;
             frame_text(osd_frame_, 48, 40, ch, 40, 255, 80, 6);
             if (stats.recording) {
-                char recl[16];
+                char recl[32];
                 int s = static_cast<int>(stats.rec_seconds);
                 std::snprintf(recl, sizeof(recl), "REC %d:%02d", s / 60, s % 60);
                 frame_text(osd_frame_, 48, 96, recl, 255, 60, 60, 3);
             }
-            char line[96];
+            char line[128];
             int n = std::snprintf(line, sizeof(line), "V:%s H:%s %.2fFPS %.2f",
                                   stats.vsync_locked ? "OK" : "--", stats.line_locked ? "OK" : "--", stats.fps, stats.freq_mhz);
             if (!stats.channel.empty() && n < static_cast<int>(sizeof(line)))
@@ -228,7 +215,7 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats, void* app_sta
     SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
     SDL_RenderClear(ren_);
     SDL_RenderCopy(ren_, tex_, nullptr, nullptr);
-    if (stats.show_help && !use_imgui_) {
+    if (stats.show_help) {
         static const char* kHelp[] = {
             "KEYS",
             "Q ESC   QUIT",
@@ -260,25 +247,19 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats, void* app_sta
                       kHelp[i], i == 0 ? 255 : 220, i == 0 ? 220 : 220,
                       i == 0 ? 0 : 220);
     }
-    if (use_imgui_) render_imgui(app_state);
     SDL_RenderPresent(ren_);
 }
 
-void SdlDisplay::render_imgui(void* app_state) {
-    ImGui_ImplSDLRenderer2_NewFrame();
-    ImGui_ImplSDL2_NewFrame();
-    ImGui::NewFrame();
-
-    ImGui::Begin("Control Panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::Text("FPV ATV Decoder");
-    ImGui::Separator();
-    if (ImGui::Button("Screenshot")) {
-        /* Screenshot action - handled via KeyAction in main loop or add direct callback */
+void SdlDisplay::render_video_only(const Frame* frame) {
+    if (frame) { last_frame_ = *frame; have_frame_ = true; }
+    if (have_frame_) {
+        // No OSD overlay - just the raw video frame
+        SDL_UpdateTexture(tex_, nullptr, last_frame_.rgba.data(), Frame::kWidth * 4);
     }
-    ImGui::End();
-
-    ImGui::Render();
-    ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), ren_);
+    SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
+    SDL_RenderClear(ren_);
+    SDL_RenderCopy(ren_, tex_, nullptr, nullptr);
+    // Note: no SDL_RenderPresent here - called after ImGui rendering
 }
 
 bool SdlDisplay::screenshot(const Frame& frame, const std::string& path) {
