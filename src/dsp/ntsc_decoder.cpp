@@ -250,8 +250,8 @@ void NtscDecoder::decode_lines() {
 void NtscDecoder::freerun_line(int64_t start) {
     Frame& f = tb_.back();
     int row = freerun_row_ * 2;
-    uint32_t* out0 = f.rgba.data() + static_cast<size_t>(row) * Frame::kWidth;
-    uint32_t* out1 = out0 + Frame::kWidth;
+    uint32_t* out0 = f.rgba.data() + static_cast<size_t>(row) * f.width;
+    uint32_t* out1 = out0 + f.width;
     int64_t n = static_cast<int64_t>(nominal_period_);
     float lo = 1e30f, hi = -1e30f;
     for (int64_t j = start; j < start + n; ++j) {
@@ -260,8 +260,8 @@ void NtscDecoder::freerun_line(int64_t start) {
         hi = std::max(hi, v);
     }
     float scale = (hi > lo) ? 255.0f / (hi - lo) : 0.0f;
-    double step = static_cast<double>(n) / Frame::kWidth;
-    for (int px = 0; px < Frame::kWidth; ++px) {
+    double step = static_cast<double>(n) / f.width;
+    for (int px = 0; px < f.width; ++px) {
         size_t idx = static_cast<size_t>(
             start + static_cast<int64_t>(px * step) - base_);
         auto g = static_cast<uint32_t>((comp_[idx] - lo) * scale);
@@ -269,7 +269,7 @@ void NtscDecoder::freerun_line(int64_t start) {
         out0[px] = px32;
         out1[px] = px32;
     }
-    if (++freerun_row_ >= Frame::kHeight / 2) {
+    if (++freerun_row_ >= f.height / 2) {
         freerun_row_ = 0;
         tb_.publish(++frame_seq_);
     }
@@ -348,9 +348,9 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
 void NtscDecoder::decode_row(double edge) {
     Frame& f = tb_.back();
     int row = (line_no_ - kActiveStartLine) * 2;
-    if (row < 0 || row + 1 >= Frame::kHeight) return;
-    uint32_t* out0 = f.rgba.data() + static_cast<size_t>(row) * Frame::kWidth;
-    uint32_t* out1 = out0 + Frame::kWidth;
+    if (row < 0 || row + 1 >= f.height) return;
+    uint32_t* out0 = f.rgba.data() + static_cast<size_t>(row) * f.width;
+    uint32_t* out1 = out0 + f.width;
 
     const double full_start = edge + 9.4 * samples_per_us_;
     const double full_span = 52.6 * samples_per_us_;
@@ -358,7 +358,7 @@ void NtscDecoder::decode_row(double edge) {
     const double crop = full_span * cfg_.overscan;
     const double active_start = full_start + crop;
     const double active_span = full_span - 2.0 * crop;
-    const double step = active_span / Frame::kWidth;
+    const double step = active_span / f.width;
     const bool color = cfg_.mode == Config::Mode::Color;
 
     // Burst: ~9+ cycles starting 5.3 us after the edge; gate 3.2 us.
@@ -376,6 +376,66 @@ void NtscDecoder::decode_row(double edge) {
                               kMinBurstAmp);
         stats_.burst_amp.store(burst.amplitude, std::memory_order_relaxed);
         phi = burst.phase + cfg_.hue_deg * M_PI / 180.0;
+    }
+
+    // Auto-detection: track chroma frequency and active line count
+    if (burst.valid && state_ == State::Track) {
+        // Store measured chroma frequency (in Hz)
+        double measured_fsc = omega_sc_ * fs_ / (2.0 * M_PI);
+        double prev = stats_.detected_chroma_hz.load(std::memory_order_relaxed);
+        if (prev > 0.0) {
+            // Average: exponential moving average for stability
+            stats_.detected_chroma_hz.store(0.7 * prev + 0.3 * measured_fsc,
+                                            std::memory_order_relaxed);
+        } else {
+            stats_.detected_chroma_hz.store(measured_fsc,
+                                            std::memory_order_relaxed);
+        }
+    }
+    
+    // Detect line rate from PLL and mark auto-detect ready when we have enough data
+    if (state_ == State::Track && pll_.locked) {
+        // line_period is in samples, fs_ is sample rate -> line_rate = fs_ / line_period
+        double line_rate_hz = fs_ / pll_.period;
+        stats_.detected_line_rate.store(
+            static_cast<int>(line_rate_hz * 1000.0 + 0.5),
+            std::memory_order_relaxed);
+        
+        // Store active line duration (in microseconds)
+        const double active_start_offset = 9.4 * samples_per_us_;
+        const double active_end_offset = active_start_offset + 52.6;
+        double active_us = active_end_offset - active_start_offset;
+        stats_.detected_active_us.store(active_us,
+                                        std::memory_order_relaxed);
+        
+        // Mark auto-detect ready after first few lines
+        int active = stats_.detected_active_lines.load(std::memory_order_acquire);
+        if (active >= 5 && stats_.detected_chroma_hz.load(std::memory_order_acquire) > 0.0) {
+            stats_.auto_detect_ready.store(true,
+                                           std::memory_order_release);
+        }
+    }
+    
+    // Calculate horizontal detail capacity based on chroma bandwidth
+    // This is the theoretical max detail in the signal (used for resolution suggestions)
+    if (stats_.auto_detect_ready.load(std::memory_order_acquire)) {
+        double chroma_hz = stats_.detected_chroma_hz.load(std::memory_order_acquire);
+        double active_us = stats_.detected_active_us.load(std::memory_order_acquire);
+        // Nyquist: 2 samples per cycle, so max detail = chroma_hz * active_us * 1e-6 * 2
+        int horiz_detail = static_cast<int>(chroma_hz * active_us * 1e-6 * 2.0 + 0.5);
+        // Store it for main.cpp to read
+        stats_.detected_horiz_detail.store(horiz_detail,
+                                           std::memory_order_release);
+    }
+    
+    // Track active line count for auto-detection
+    if (line_no_ == kActiveStartLine && state_ == State::Track) {
+        stats_.detected_active_lines.store(0,
+                                           std::memory_order_release);
+    } else if (line_no_ >= kActiveStartLine && line_no_ < kActiveStartLine + kActiveLines) {
+        int current = stats_.detected_active_lines.load(std::memory_order_relaxed);
+        stats_.detected_active_lines.store(current + 1,
+                                           std::memory_order_relaxed);
     }
 
     if (color && burst.valid) {
@@ -421,7 +481,7 @@ void NtscDecoder::decode_row(double edge) {
             svf_[i] = av;
         }
         const float sat = cfg_.saturation;
-        for (int px = 0; px < Frame::kWidth; ++px) {
+        for (int px = 0; px < f.width; ++px) {
             double p = active_start + px * step;
             float y = ire_frac(p) - chroma_frac(p);
             // filtered UV value centered at abs pos p
@@ -444,7 +504,7 @@ void NtscDecoder::decode_row(double edge) {
             out1[px] = px32;
         }
     } else {
-        for (int px = 0; px < Frame::kWidth; ++px) {
+        for (int px = 0; px < f.width; ++px) {
             double p = active_start + px * step;
             float y = ire_frac(p) - chroma_frac(p);
             uint32_t g = static_cast<uint32_t>(

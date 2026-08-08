@@ -62,6 +62,10 @@ void usage() {
         "  --frames N            number of frames for --dump-frames (default 30)\n"
         "  --spectrum            print PSD and exit (no video)\n"
         "  --gui imgui|sdl       GUI mode: imgui (default, no hotkeys) or sdl (hotkeys)\n"
+        "  --resolution WxH      output resolution (default 640x480)\n"
+        "  --aspect 4:3|16:9|16:10|5:4|custom  aspect ratio preset\n"
+        "  --auto-res            enable auto-detection of signal standard and\n"
+        "                        suggest resolution based on detected content\n"
         "  --enforce-clkin       require external CLKIN lock at startup\n"
         "  --no-clkout           disable CLKOUT (default: 10 MHz output on)\n"
         "\nImGui overlay options:\n"
@@ -179,7 +183,40 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         else if (a == "--no-agc") cfg->show_agc = false;
         else if (a == "--no-clkin") cfg->show_clkin = false;
         else if (a == "--no-stats") cfg->show_stats = false;
-        else if (a == "--help" || a == "-h") { usage(); std::exit(0); }
+        else if (a == "--auto-res") cfg->auto_detect = true;
+        else if (a == "--resolution") {
+            std::string v = next("--resolution");
+            if (v.find('x') == std::string::npos) {
+                std::fprintf(stderr, "--resolution: expected format WxH (e.g. 640x480)\n");
+                return false;
+            }
+            char *end;
+            cfg->frame_width = std::strtol(v.c_str(), &end, 10);
+            if (*end != 'x') {
+                std::fprintf(stderr, "--resolution: expected format WxH\n");
+                return false;
+            }
+            cfg->frame_height = std::strtol(end + 1, &end, 10);
+            if (*end != '\0') {
+                std::fprintf(stderr, "--resolution: expected format WxH\n");
+                return false;
+            }
+            if (cfg->frame_width <= 0 || cfg->frame_height <= 0) {
+                std::fprintf(stderr, "--resolution: dimensions must be positive\n");
+                return false;
+            }
+        } else if (a == "--aspect") {
+            std::string v = next("--aspect");
+            if (v == "4:3") cfg->aspect_ratio = Config::AspectRatio::R4_3;
+            else if (v == "16:9") cfg->aspect_ratio = Config::AspectRatio::R16_9;
+            else if (v == "16:10") cfg->aspect_ratio = Config::AspectRatio::R16_10;
+            else if (v == "5:4") cfg->aspect_ratio = Config::AspectRatio::R5_4;
+            else if (v == "custom") cfg->aspect_ratio = Config::AspectRatio::Custom;
+            else {
+                std::fprintf(stderr, "--aspect: must be 4:3, 16:9, 16:10, 5:4, or custom\n");
+                return false;
+            }
+        } else if (a == "--help" || a == "-h") { usage(); std::exit(0); }
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return false; }
     }
     if (cfg->input == Config::Input::File && cfg->file_path.empty()) {
@@ -193,7 +230,7 @@ bool parse_args(int argc, char** argv, Config* cfg) {
 void write_ppm(const Frame& f, const std::string& path) {
     std::FILE* fp = std::fopen(path.c_str(), "wb");
     if (!fp) return;
-    std::fprintf(fp, "P6\n%d %d\n255\n", Frame::kWidth, Frame::kHeight);
+    std::fprintf(fp, "P6\n%d %d\n255\n", f.width, f.height);
     std::vector<uint8_t> rgb(f.rgba.size() * 3);
     size_t o = 0;
     for (uint32_t px : f.rgba) {
@@ -378,6 +415,7 @@ int main(int argc, char** argv) {
     }
 
     TripleBuffer tb;
+    tb.resize(cfg.frame_width, cfg.frame_height);
     NtscDecoder dec(cfg, tb);
     std::atomic<float> mean_raw{0.0f};
     std::thread dsp(dsp_thread, std::cref(cfg), src.get(), &dec, &rec, &mean_raw);
@@ -411,12 +449,14 @@ int main(int argc, char** argv) {
     } else {
         bool use_imgui = (cfg.gui_mode == Config::GuiMode::ImGui);
         SdlDisplay disp;
-        if (!disp.init("fpvdec - FPV ATV decoder")) {
+        if (!disp.init("fpvdec - FPV ATV decoder", cfg.frame_width, cfg.frame_height)) {
             std::fprintf(stderr, "SDL init failed\n");
             g_running.store(false);
             dsp.join();
             return 1;
         }
+        tb.resize(cfg.frame_width, cfg.frame_height);
+        disp.rebuild_crt_lut(cfg.frame_width, cfg.frame_height);
 
         GuiManager gui;
         if (use_imgui) {
@@ -506,6 +546,73 @@ int main(int argc, char** argv) {
             st.amp = mcfg.amp;
             st.gain_auto = mcfg.gain_auto;
             st.clkin_locked = hackrf ? hackrf->check_clkin() : false;
+            
+            // Auto-resolution: apply detected resolution after lock is acquired
+            if (mcfg.auto_detect && !mcfg.auto_res_applied && 
+                dec.stats().auto_detect_ready.load(std::memory_order_acquire)) {
+                double chroma_hz = dec.stats().detected_chroma_hz.load(std::memory_order_acquire);
+                int active_lines = dec.stats().detected_active_lines.load(std::memory_order_acquire);
+                int horiz_detail = dec.stats().detected_horiz_detail.load(std::memory_order_acquire);
+                int line_rate_mhz = dec.stats().detected_line_rate.load(std::memory_order_acquire);
+                
+                // Determine standard from chroma frequency
+                bool is_pal = (chroma_hz > 4.0e6);  // PAL ~4.43 MHz vs NTSC ~3.58 MHz
+                
+                // If active_lines wasn't counted (grayscale or no burst), use standard values
+                if (active_lines <= 0) {
+                    active_lines = is_pal ? 288 : 240;  // PAL vs NTSC standard
+                }
+                
+                // Apply aspect ratio preset to calculate target dimensions
+                int target_width = mcfg.frame_width;
+                int target_height = mcfg.frame_height;
+                
+                if (mcfg.aspect_ratio != Config::AspectRatio::Custom && 
+                    mcfg.aspect_ratio != Config::AspectRatio::R4_3 &&
+                    mcfg.aspect_ratio != Config::AspectRatio::R16_9 &&
+                    mcfg.aspect_ratio != Config::AspectRatio::R16_10 &&
+                    mcfg.aspect_ratio != Config::AspectRatio::R5_4) {
+                    // Custom resolution — use user-specified
+                } else if (mcfg.aspect_ratio == Config::AspectRatio::R16_9) {
+                    // 16:9 widescreen
+                    target_width = static_cast<int>(target_height * 16.0 / 9.0 + 0.5);
+                } else if (mcfg.aspect_ratio == Config::AspectRatio::R16_10) {
+                    // 16:10
+                    target_width = static_cast<int>(target_height * 16.0 / 10.0 + 0.5);
+                } else if (mcfg.aspect_ratio == Config::AspectRatio::R5_4) {
+                    // 5:4
+                    target_width = static_cast<int>(target_height * 5.0 / 4.0 + 0.5);
+                } else if (mcfg.aspect_ratio == Config::AspectRatio::R4_3) {
+                    // 4:3 standard
+                    target_width = static_cast<int>(target_height * 4.0 / 3.0 + 0.5);
+                }
+                
+                // If user specified --resolution, respect it
+                if (mcfg.aspect_ratio == Config::AspectRatio::Custom) {
+                    target_width = mcfg.frame_width;
+                    target_height = mcfg.frame_height;
+                }
+                
+                // Apply the new resolution
+                mcfg.frame_width = target_width;
+                mcfg.frame_height = target_height;
+                mcfg.auto_res_applied = true;
+                
+                // Resize the pipeline
+                tb.resize(mcfg.frame_width, mcfg.frame_height);
+                disp.rebuild_crt_lut(mcfg.frame_width, mcfg.frame_height);
+                
+                // Report what we detected
+                std::printf("AUTO-RES: detected %s (chroma=%.2f MHz, %d active lines, "
+                           "horiz_detail=%d, line_rate=%.3f kHz)\n",
+                           is_pal ? "PAL" : "NTSC",
+                           chroma_hz / 1e6, active_lines,
+                           horiz_detail, line_rate_mhz / 1000.0);
+                std::printf("  -> applying resolution: %dx%d\n", 
+                           mcfg.frame_width, mcfg.frame_height);
+                std::fflush(stdout);
+            }
+            
             auto now = std::chrono::steady_clock::now();
             if (st.clipped > last_clip_count) { last_clip_count = st.clipped; last_clip_seen = now; }
             st.clipping = (now - last_clip_seen) < std::chrono::seconds(1);

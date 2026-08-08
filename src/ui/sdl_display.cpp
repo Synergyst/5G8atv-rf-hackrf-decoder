@@ -46,52 +46,6 @@ const uint8_t* glyph5x7(char c) {
     }
 }
 
-struct CrtLut {
-    struct Entry {
-        int32_t src;
-        uint16_t gain;
-    };
-    std::vector<Entry> map;
-    CrtLut() {
-        map.resize(static_cast<size_t>(Frame::kWidth) * Frame::kHeight);
-        const double cx = Frame::kWidth / 2.0, cy = Frame::kHeight / 2.0;
-        const double k1 = 0.055;
-        for (int y = 0; y < Frame::kHeight; ++y) {
-            for (int x = 0; x < Frame::kWidth; ++x) {
-                double nx = (x - cx) / cx, ny = (y - cy) / cy;
-                double r2 = nx * nx + ny * ny;
-                double f = 1.0 + k1 * r2;
-                int sx = static_cast<int>(cx + nx * f * cx + 0.5);
-                int sy = static_cast<int>(cy + ny * f * cy + 0.5);
-                Entry& e = map[static_cast<size_t>(y) * Frame::kWidth + x];
-                if (sx < 0 || sx >= Frame::kWidth || sy < 0 || sy >= Frame::kHeight) {
-                    e.src = -1; e.gain = 0;
-                } else {
-                    e.src = sy * Frame::kWidth + sx;
-                    double vig = 1.0 - 0.18 * r2 * r2;
-                    double scan = (sy & 1) ? 0.72 : 1.0;
-                    e.gain = static_cast<uint16_t>(std::max(0.0, vig * scan) * 256.0 + 0.5);
-                }
-            }
-        }
-    }
-};
-
-void apply_crt(const Frame& in, Frame& out) {
-    static const CrtLut lut;
-    const uint32_t* src = in.rgba.data();
-    uint32_t* dst = out.rgba.data();
-    for (size_t i = 0; i < lut.map.size(); ++i) {
-        const CrtLut::Entry& e = lut.map[i];
-        if (e.src < 0) { dst[i] = 0xff000000u; continue; }
-        uint32_t p = src[e.src];
-        uint32_t r = ((p & 0xffu) * e.gain) >> 8;
-        uint32_t g = (((p >> 8) & 0xffu) * e.gain) >> 8;
-        uint32_t b = (((p >> 16) & 0xffu) * e.gain) >> 8;
-        dst[i] = 0xff000000u | (b << 16) | (g << 8) | r;
-    }
-}
-
 constexpr int kFontScale = 2;
 constexpr int kCharW = 6 * kFontScale;
 
@@ -107,8 +61,8 @@ void frame_text(Frame& f, int x, int y, const std::string& text, uint8_t r, uint
                     for (int dy = 0; dy < scale; ++dy)
                         for (int dx = 0; dx < scale; ++dx) {
                             int xx = bx + dx, yy = by + dy;
-                            if (xx >= 0 && xx < Frame::kWidth && yy >= 0 && yy < Frame::kHeight)
-                                f.rgba[static_cast<size_t>(yy) * Frame::kWidth + xx] = px32;
+                            if (xx >= 0 && xx < f.width && yy >= 0 && yy < f.height)
+                                f.rgba[static_cast<size_t>(yy) * f.width + xx] = px32;
                         }
                 }
     }
@@ -129,15 +83,31 @@ void draw_text(SDL_Renderer* ren, int x, int y, const std::string& text, uint8_t
 
 } // namespace
 
-bool SdlDisplay::init(const std::string& title) {
+void apply_crt(const Frame& in, Frame& out, const CrtLut& lut) {
+    const uint32_t* src = in.rgba.data();
+    uint32_t* dst = out.rgba.data();
+    for (size_t i = 0; i < lut.map.size(); ++i) {
+        const CrtLut::Entry& e = lut.map[i];
+        if (e.src < 0) { dst[i] = 0xff000000u; continue; }
+        uint32_t p = src[e.src];
+        uint32_t r = ((p & 0xffu) * e.gain) >> 8;
+        uint32_t g = (((p >> 8) & 0xffu) * e.gain) >> 8;
+        uint32_t b = (((p >> 16) & 0xffu) * e.gain) >> 8;
+        dst[i] = 0xff000000u | (b << 16) | (g << 8) | r;
+    }
+}
+
+bool SdlDisplay::init(const std::string& title, int width, int height) {
+    win_width_ = width;
+    win_height_ = height;
     if (SDL_Init(SDL_INIT_VIDEO) != 0) return false;
-    win_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, Frame::kWidth, Frame::kHeight, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    win_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!win_) return false;
     ren_ = SDL_CreateRenderer(win_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!ren_) ren_ = SDL_CreateRenderer(win_, -1, 0);
     if (!ren_) return false;
-    SDL_RenderSetLogicalSize(ren_, Frame::kWidth, Frame::kHeight);
-    tex_ = SDL_CreateTexture(ren_, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, Frame::kWidth, Frame::kHeight);
+    SDL_RenderSetLogicalSize(ren_, width, height);
+    tex_ = SDL_CreateTexture(ren_, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, width, height);
     if (!tex_) return false;
     return true;
 }
@@ -204,16 +174,16 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
             if (n < static_cast<int>(sizeof(line)))
                 n += std::snprintf(line + n, sizeof(line) - n, " %.0fMS %s L%d V%d%s", stats.video_latency_ms, stats.gain_auto ? "AUTO" : "MAN", stats.lna, stats.vga, stats.amp ? " AMP" : "");
             std::string t(line);
-            int x = (Frame::kWidth - static_cast<int>(t.size()) * kCharW) / 2;
+            int x = (win_width_ - static_cast<int>(t.size()) * kCharW) / 2;
             if (x < 4) x = 4;
             frame_text(osd_frame_, x, 28, t, 255, 220, 0);
-            if (stats.clipping) frame_text(osd_frame_, Frame::kWidth - 28 - static_cast<int>(std::string("CLIP").size()) * kCharW, 28 + 9 * kFontScale, "CLIP", 255, 60, 60);
+            if (stats.clipping) frame_text(osd_frame_, win_width_ - 28 - static_cast<int>(std::string("CLIP").size()) * kCharW, 28 + 9 * kFontScale, "CLIP", 255, 60, 60);
         }
         if (stats.crt) {
-            apply_crt(osd_frame_, crt_frame_);
-            SDL_UpdateTexture(tex_, nullptr, crt_frame_.rgba.data(), Frame::kWidth * 4);
+            apply_crt(osd_frame_, crt_frame_, crt_lut_);
+            SDL_UpdateTexture(tex_, nullptr, crt_frame_.rgba.data(), win_width_ * 4);
         } else {
-            SDL_UpdateTexture(tex_, nullptr, osd_frame_.rgba.data(), Frame::kWidth * 4);
+            SDL_UpdateTexture(tex_, nullptr, osd_frame_.rgba.data(), win_width_ * 4);
         }
     }
     SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
@@ -241,7 +211,7 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
         const int n = static_cast<int>(sizeof(kHelp) / sizeof(kHelp[0]));
         int bw = 23 * kCharW + 32;
         int bh = n * 9 * kFontScale + 32;
-        SDL_Rect box{(Frame::kWidth - bw) / 2, (Frame::kHeight - bh) / 2, bw, bh};
+        SDL_Rect box{(win_width_ - bw) / 2, (win_height_ - bh) / 2, bw, bh};
         SDL_SetRenderDrawBlendMode(ren_, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(ren_, 0, 0, 0, 200);
         SDL_RenderFillRect(ren_, &box);
@@ -258,7 +228,7 @@ void SdlDisplay::render_video_only(const Frame* frame) {
     if (frame) { last_frame_ = *frame; have_frame_ = true; }
     if (have_frame_) {
         // No OSD overlay - just the raw video frame
-        SDL_UpdateTexture(tex_, nullptr, last_frame_.rgba.data(), Frame::kWidth * 4);
+        SDL_UpdateTexture(tex_, nullptr, last_frame_.rgba.data(), win_width_ * 4);
     }
     SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
     SDL_RenderClear(ren_);
@@ -268,8 +238,8 @@ void SdlDisplay::render_video_only(const Frame* frame) {
 
 bool SdlDisplay::screenshot(const Frame& frame, const std::string& path) {
     SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormatFrom(
-        const_cast<uint32_t*>(frame.rgba.data()), Frame::kWidth,
-        Frame::kHeight, 32, Frame::kWidth * 4, SDL_PIXELFORMAT_ABGR8888);
+        const_cast<uint32_t*>(frame.rgba.data()), frame.width,
+        frame.height, 32, frame.width * 4, SDL_PIXELFORMAT_ABGR8888);
     if (!surf) return false;
     bool ok = SDL_SaveBMP(surf, path.c_str()) == 0;
     SDL_FreeSurface(surf);

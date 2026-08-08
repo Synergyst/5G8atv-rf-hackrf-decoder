@@ -153,9 +153,9 @@ int main(int argc, char** argv) {
     int failures = 0;
     for (int b = 0; b < 7; ++b) {
         // sample at the center of each bar, mid-height
-        int px = static_cast<int>((b + 0.5) / 7.0 * Frame::kWidth);
-        int py = Frame::kHeight / 2;
-        uint32_t p = f->rgba[static_cast<size_t>(py) * Frame::kWidth + px];
+        int px = static_cast<int>((b + 0.5) / 7.0 * f->width);
+        int py = f->height / 2;
+        uint32_t p = f->rgba[static_cast<size_t>(py) * f->width + px];
         int r = p & 0xff, g = (p >> 8) & 0xff, bl = (p >> 16) & 0xff;
         int er = static_cast<int>(kBars[b].r * 255.0f + 0.5f);
         int eg = static_cast<int>(kBars[b].g * 255.0f + 0.5f);

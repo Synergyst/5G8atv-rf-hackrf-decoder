@@ -39,6 +39,14 @@ public:
         // correct across input drops).
         std::atomic<uint64_t> frame_sample_pos{0};
         std::atomic<uint64_t> samples_in{0};
+
+        // Auto-detection results (populated after lock is acquired).
+        std::atomic<double> detected_chroma_hz{0.0};  // measured burst subcarrier
+        std::atomic<int> detected_active_lines{0};    // lines between vsync
+        std::atomic<int> detected_line_rate{0};       // hsync frequency in mHz
+        std::atomic<double> detected_active_us{0.0};  // active line duration in microseconds
+        std::atomic<int> detected_horiz_detail{0};    // max horizontal detail pixels
+        std::atomic<bool> auto_detect_ready{false};
     };
 
     NtscDecoder(const Config& cfg, TripleBuffer& out);

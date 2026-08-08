@@ -59,6 +59,22 @@ struct Config {
     // right at the edges (TV-style hiding was 0.047).
     float overscan = 0.0f;
 
+    // Output resolution and aspect ratio.
+    int frame_width = 640;
+    int frame_height = 480;
+    enum class AspectRatio {
+        Custom,    // user-defined WxH
+        R4_3,      // 4:3 — standard for NTSC/PAL
+        R16_9,     // 16:9 — widescreen
+        R16_10,    // 16:10
+        R5_4,      // 5:4
+    };
+    AspectRatio aspect_ratio = AspectRatio::Custom;
+    
+    // Auto-detection mode
+    bool auto_detect = false;  // enable --auto-res mode
+    bool auto_res_applied = false;  // mark when auto-resolution has been applied
+
     enum class GuiMode { ImGui, Sdl };
     GuiMode gui_mode = GuiMode::ImGui;
 

@@ -7,12 +7,20 @@
 namespace famidec {
 
 struct Frame {
-    static constexpr int kWidth = 640;
-    static constexpr int kHeight = 480;
+    int width = 0;
+    int height = 0;
     std::vector<uint32_t> rgba;  // ABGR8888 byte order R,G,B,A in memory
     uint64_t seq = 0;
 
-    Frame() : rgba(kWidth * kHeight, 0xff000000u) {}
+    Frame() = default;
+
+    // Resize the frame buffer to the specified dimensions.
+    void resize(int w, int h) {
+        width = w;
+        height = h;
+        // 0xff000000u is black (BGRA: B=0, G=0, R=0, A=255)
+        rgba.resize(w * h, 0xff000000u);
+    }
 };
 
 // Triple buffer: DSP thread writes into back(), publishes; render thread
@@ -20,6 +28,12 @@ struct Frame {
 class TripleBuffer {
 public:
     Frame& back() { return bufs_[back_idx_]; }
+
+    void resize(int w, int h) {
+        for (auto& buf : bufs_) {
+            buf.resize(w, h);
+        }
+    }
 
     void publish(uint64_t seq) {
         bufs_[back_idx_].seq = seq;
