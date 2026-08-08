@@ -55,8 +55,13 @@ bottom):
 | **Signal Bars** | Ring buffer fill level + chroma/burst amplitude (color strength) |
 | **AGC Info** | Gain mode (auto/manual), LNA & VGA levels, RF amp state |
 | **Stats** | Frame count, dropped bytes, clipping flag, video latency |
+| **CLKIN** | External reference clock lock status (when --enforce-clkin) |
 
 No keyboard hotkeys are active in this mode.
+
+The overlay supports customization: font size (`--overlay-font`), color
+(`--overlay-color`), position (`--overlay-top`/`--overlay-bottom`), and
+per-section visibility toggles (`--no-signal`, `--no-agc`, `--no-stats`, etc.).
 
 ### SDL Mode (`--gui sdl`)
 
@@ -130,6 +135,26 @@ cmake --build build -j
 
 # Legacy SDL mode with hotkeys (for testing)
 ./build/fpvdec --channel F4 --gui sdl
+
+# Configurable output resolution
+./build/fpvdec --channel F4 --resolution 1280x720
+./build/fpvdec --channel F4 --resolution 1920x1080
+
+# Aspect ratio presets (with default 640x480 or user-specified resolution)
+./build/fpvdec --channel F4 --aspect 16:9
+./build/fpvdec --channel F4 --aspect 4:3 --resolution 800x600
+
+# Auto-detect signal standard and suggest resolution
+./build/fpvdec --channel F4 --auto-res
+./build/fpvdec --channel F4 --auto-res --aspect 16:9
+
+# Overlay customization (ImGui mode)
+./build/fpvdec --channel F4 --overlay-font 16 --overlay-color 0.0,0.8,1.0
+./build/fpvdec --channel F4 --overlay-bottom --no-agc --no-stats
+
+# GPSDO support (external 10 MHz reference clock)
+./build/fpvdec --channel F4 --enforce-clkin
+./build/fpvdec --channel F4 --no-clkout  # disable CLKOUT output
 ```
 
 ### Options
@@ -154,6 +179,67 @@ cmake --build build -j
 | `--dump-composite PATH` | dump post-AGC composite as f32 (debug) |
 | `--spectrum` | print PSD and exit |
 | `--gui imgui\|sdl` | GUI mode: **imgui** (default, floating control panel, no hotkeys) or **sdl** (legacy hotkeys for testing) |
+| `--resolution WxH` | output resolution (default 640×480) |
+| `--aspect 4:3\|16:9\|16:10\|5:4` | aspect ratio preset (default: use resolution dimensions) |
+| `--auto-res` | auto-detect signal standard and suggest resolution |
+
+#### Resolution & Aspect Ratio
+
+fpvdec supports configurable output resolution with aspect ratio presets. The resolution determines how many pixels the decoded video frame maps to, while the aspect ratio presets allow stretching or cropping the output to different screen formats.
+
+**Examples:**
+
+```sh
+# Manual resolution override (stretches signal to fit)
+./build/fpvdec --channel F4 --resolution 1920x1080
+
+# Aspect ratio presets with default 640x480 resolution
+./build/fpvdec --channel F4 --aspect 16:9    # 853x480 (widescreen stretch)
+./build/fpvdec --channel F4 --aspect 4:3     # 640x480 (standard)
+
+# Auto-detect with aspect override
+./build/fpvdec --channel F4 --auto-res --aspect 16:9
+# → Detects NTSC/PAL, applies 16:9 widescreen stretch
+```
+
+**Auto-detection (`--auto-res`)** measures the signal in real-time:
+- Chroma subcarrier frequency (3.58 MHz = NTSC, 4.43 MHz = PAL)
+- Active line count (240 = NTSC, 288 = PAL)
+- Hsync frequency (~15.7 kHz = NTSC, ~15.6 kHz = PAL)
+- Horizontal detail capacity (~250 pixels of actual signal content)
+
+After lock is acquired, fpvdec reports what it detected and suggests an appropriate resolution. The aspect ratio preset then modifies this to the desired screen format. This is useful for adapting the decoder to non-standard transmitters or widescreen displays.
+
+#### Overlay Customization (ImGui mode)
+
+The ImGui overlay supports fine-grained customization:
+
+```sh
+# Font size and color
+./build/fpvdec --channel F4 --overlay-font 16
+./build/fpvdec --channel F4 --overlay-color 0.0,0.8,1.0   # R,G,B in 0.0..1.0
+
+# Position and visibility
+./build/fpvdec --channel F4 --overlay-bottom   # move to bottom
+./build/fpvdec --channel F4 --no-agc           # hide AGC info
+./build/fpvdec --channel F4 --no-stats         # hide frame/dropped/latency stats
+./build/fpvdec --channel F4 --no-signal        # hide signal quality bars
+./build/fpvdec --channel F4 --no-clkin         # hide CLKIN status
+```
+
+#### GPSDO Support (CLKIN / CLKOUT)
+
+fpvdec supports external GPSDO (Global Positioning System Disciplined Oscillator) for precision clocking:
+
+```sh
+# Require external 10 MHz reference clock (CLKIN)
+./build/fpvdec --channel F4 --enforce-clkin
+
+# Disable 10 MHz clock output (CLKOUT) if not needed
+./build/fpvdec --channel F4 --no-clkout
+```
+
+The decoder reports CLKIN lock status in the overlay ("CLKIN: LOCKED" or "CLKIN: ----"). Using an external reference clock improves AFC stability and reduces drift.
 
 ## How it works
 
@@ -166,8 +252,13 @@ HackRF One (10 MSPS, tuned to the channel; AFC re-centers on the VTX)
   → sync separation on a dedicated 1 MHz low-pass stream (~7 dB noise margin)
   → flywheel line PLL with interlace-aware half-line re-anchoring
   → 3.58 MHz chroma BPF, per-line burst measurement, U/V demod
-  → YUV→RGB 640×480 (fields line-doubled, ~59.94 updates/s)
+  → YUV→RGB configurable resolution (fields line-doubled, ~59.94 updates/s)
   → triple buffer → GUI display (ImGui or SDL)
+
+The output resolution is configurable via `--resolution WxH` (default 640×480)
+and supports aspect ratio presets (`--aspect 16:9`, `--aspect 4:3`, etc.).
+Auto-detection (`--auto-res`) can determine the signal standard and suggest
+an appropriate resolution.
 ```
 
 Compared to the Famicom original: FM instead of AM detection, two-stage
@@ -203,6 +294,7 @@ ctest --test-dir build -C Release
 | Distorted up close | auto gain backs off, but very close in also toggle the amp off (`b`) |
 | No color | signal too weak for burst detection, or `--rate` below 8 MSPS |
 | Video latency climbing | CPU can't keep up — lower `--rate` (8e6 / 6e6) |
+| Stretched/distorted image | Use `--aspect 4:3` for standard, `--resolution` to match your display |
 
 ## License / disclaimer
 
