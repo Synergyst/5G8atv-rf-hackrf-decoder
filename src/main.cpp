@@ -22,6 +22,9 @@
 #include "source/file_source.hpp"
 #include "source/hackrf_source.hpp"
 #include "source/sample_source.hpp"
+#ifdef HAVE_SOAPYSDR
+#include "source/soapy_source.hpp"
+#endif
 #include "ui/sdl_display.hpp"
 #include "ui/gui_manager.hpp"
 #include "util/fpv_channels.hpp"
@@ -64,8 +67,11 @@ void usage() {
         "  --gui imgui|sdl       GUI mode: imgui (default, no hotkeys) or sdl (hotkeys)\n"
         "  --resolution WxH      output resolution (default 640x480)\n"
         "  --aspect 4:3|16:9|16:10|5:4|custom  aspect ratio preset\n"
-        "  --auto-res            enable auto-detection of signal standard and\n"
-        "                        suggest resolution based on detected content\n"
+#ifdef HAVE_SOAPYSDR
+        "  --source hackrf|file|soapysdr  input source (default: hackrf)\n"
+        "  --device ARGS         SoapySDR device args (e.g. 'driver=uhd' or\n"
+        "                        'driver=uhd,addr=192.168.10.2')\n"
+#endif
         "  --enforce-clkin       require external CLKIN lock at startup\n"
         "  --no-clkout           disable CLKOUT (default: 10 MHz output on)\n"
         "\nImGui overlay options:\n"
@@ -107,7 +113,27 @@ bool parse_args(int argc, char** argv, Config* cfg) {
             if (v == "hackrf") cfg->input = Config::Input::HackRF;
             else if (v == "file") cfg->input = Config::Input::File;
             else return false;
+        } else if (a == "--source") {
+            std::string v = next("--source");
+            if (v == "hackrf") {
+                cfg->input = Config::Input::HackRF;
+            } else if (v == "file") {
+                cfg->input = Config::Input::File;
+            } else if (v == "soapysdr") {
+#ifdef HAVE_SOAPYSDR
+                cfg->input = Config::Input::SoapySDR;
+#else
+                std::fprintf(stderr, "error: SoapySDR support not compiled in\n");
+                return false;
+#endif
+            } else {
+                std::fprintf(stderr, "source must be hackrf|file|soapysdr\n");
+                return false;
+            }
         } else if (a == "--file") { cfg->file_path = next("--file"); cfg->input = Config::Input::File; }
+#ifdef HAVE_SOAPYSDR
+        else if (a == "--device") cfg->soapysdr_device_args = next("--device");
+#endif
         else if (a == "--loop") cfg->loop = true;
         else if (a == "--rate") cfg->sample_rate = std::atof(next("--rate"));
         else if (a == "--offset") cfg->offset_hz = std::atof(next("--offset"));
@@ -169,8 +195,6 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         }
         else if (a == "--overlay-margin") {
             std::string v = next("--overlay-margin");
-            // Parse "X,Y" format
-            char *end;
             cfg->overlay_margin_x = std::atoi(v.c_str());
             auto comma = v.find(',');
             if (comma != std::string::npos) {
@@ -378,10 +402,20 @@ int main(int argc, char** argv) {
 
     std::unique_ptr<ISampleSource> src;
     HackRfSource* hackrf = nullptr;
+#ifdef HAVE_SOAPYSDR
+    SoapySource* soapysdr = nullptr;
+#endif
+    
     if (cfg.input == Config::Input::HackRF) {
         auto h = std::make_unique<HackRfSource>(cfg);
         hackrf = h.get();
         src = std::move(h);
+#ifdef HAVE_SOAPYSDR
+    } else if (cfg.input == Config::Input::SoapySDR) {
+        auto s = std::make_unique<SoapySource>(cfg, cfg.soapysdr_device_args);
+        soapysdr = s.get();
+        src = std::move(s);
+#endif
     } else {
         src = std::make_unique<FileSource>(cfg, !cfg.headless && !cfg.spectrum);
     }
@@ -400,7 +434,17 @@ int main(int argc, char** argv) {
                     hackrf->check_clkin() ? "locked (external clock)" : "unlocked (internal oscillator)",
                     cfg.enforce_clkin && hackrf->check_clkin() ? " [enforced]" : "");
     }
+#ifdef HAVE_SOAPYSDR
+    std::string source_name;
+    if (cfg.input == Config::Input::HackRF) source_name = "HackRF";
+    else if (cfg.input == Config::Input::SoapySDR) {
+        source_name = "SoapySDR";
+        if (soapysdr) source_name += " (" + soapysdr->device_info() + ")";
+    } else source_name = cfg.file_path;
+    std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", source_name.c_str(), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
+#else
     std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", cfg.input == Config::Input::HackRF ? "HackRF" : cfg.file_path.c_str(), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
+#endif
 
     if (cfg.spectrum) {
         int rc = run_spectrum(cfg, src.get());

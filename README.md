@@ -182,6 +182,8 @@ cmake --build build -j
 | `--resolution WxH` | output resolution (default 640×480) |
 | `--aspect 4:3\|16:9\|16:10\|5:4` | aspect ratio preset (default: use resolution dimensions) |
 | `--auto-res` | auto-detect signal standard and suggest resolution |
+| `--source hackrf\|file\|soapysdr` | input source (default: hackrf) |
+| `--device ARGS` | SoapySDR device args (e.g., 'driver=uhd') |
 
 #### Resolution & Aspect Ratio
 

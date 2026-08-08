@@ -23,10 +23,11 @@ struct Config {
                                // --lna/--vga, or the l/g keys. The RF amp
                                // is never auto-switched (intermod risk).
 
-    enum class Input { HackRF, File };
+    enum class Input { HackRF, File, SoapySDR };
     Input input = Input::HackRF;
     std::string file_path;
     bool loop = false;
+    std::string soapysdr_device_args;  // device selection for SoapySDR
 
     enum class Mode { Color, Gray };
     Mode mode = Mode::Color;

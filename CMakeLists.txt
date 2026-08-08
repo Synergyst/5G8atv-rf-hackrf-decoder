@@ -9,7 +9,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 if(MSVC)
     add_compile_definitions(_USE_MATH_DEFINES NOMINMAX)
-    add_compile_options(/fp:fast /arch:AVX2 /utf-8)
+    add_compile_options(/fp:fast /arch/AVX2 /utf-8)
 else()
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -ffast-math")
 endif()
@@ -40,6 +40,12 @@ endif()
 find_package(SDL2 REQUIRED CONFIG
              HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2")
 
+# SoapySDR: optional, enables additional SDR device support (LibreSDR B220, etc.)
+option(SOAPYSDR "Enable SoapySDR support for additional SDR devices" OFF)
+if(SOAPYSDR)
+    find_package(SoapySDR REQUIRED)
+endif()
+
 add_library(fpv_dsp STATIC
     src/dsp/ntsc_decoder.cpp
 )
@@ -51,6 +57,14 @@ add_executable(fpvdec
     src/ui/sdl_display.cpp
     src/ui/gui_manager.cpp
 )
+
+# Add SoapySDR source and dependencies if enabled
+if(SOAPYSDR)
+    target_sources(fpvdec PRIVATE src/source/soapy_source.cpp)
+    target_link_libraries(fpvdec PRIVATE ${SoapySDR_LIBRARIES})
+    target_include_directories(fpvdec PRIVATE ${SoapySDR_INCLUDE_DIRS})
+    target_compile_definitions(fpvdec PRIVATE HAVE_SOAPYSDR)
+endif()
 
 # ImGui (used only by gui_manager, not directly by main)
 set(IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
