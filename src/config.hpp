@@ -77,6 +77,12 @@ struct Config {
     enum class OverlayPos { Top, Bottom };
     OverlayPos overlay_position = OverlayPos::Top;  // top or bottom (default: top)
 
+    // Overlay section visibility — default true (enabled). Use --no-* to hide.
+    bool show_signal = true;          // ring buffer, chroma bar, clipping
+    bool show_agc = true;             // manual gain info (LNA/VGA/AMP)
+    bool show_clkin = true;           // external clock locked indicator
+    bool show_stats = true;           // frames, dropped, clipping, latency
+
     double center_hz() const { return video_carrier_hz + offset_hz; }
 };
 

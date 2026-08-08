@@ -140,7 +140,8 @@ void GuiManager::render_control_panel(const OsdStats& stats) {
     {
         if (stats.line_locked && stats.vsync_locked) {
             ImGui::PushStyleColor(ImGuiCol_Text, col_sync_ok);
-            ImGui::Text("[SYNC] Line/Frame locked  %.1f FPS", stats.fps);
+            ImGui::Text("[SYNC] Line/Frame locked");
+            //ImGui::Text("[SYNC] Line/Frame locked  %.1f FPS", stats.fps);
         } else if (stats.vsync_locked) {
             ImGui::PushStyleColor(ImGuiCol_Text, col_sync_warn);
             ImGui::Text("[SYNC] Frame locked -- line lost");
@@ -151,8 +152,8 @@ void GuiManager::render_control_panel(const OsdStats& stats) {
         ImGui::PopStyleColor();
     }
 
-    // Signal Quality
-    {
+    // Signal Quality (ring buffer, chroma, clipping)
+    if (cfg_.show_signal) {
         float bar_w = 150.0f;
         float bar_h = 10.0f;
         char buf[32];
@@ -180,8 +181,8 @@ void GuiManager::render_control_panel(const OsdStats& stats) {
         }
     }
 
-    // AGC Info
-    {
+    // AGC Info (manual gain readout)
+    if (cfg_.show_agc) {
         if (stats.gain_auto) {
             ImGui::PushStyleColor(ImGuiCol_Text, col_agc_auto);
             ImGui::Text("[AGC] AUTO");
@@ -195,15 +196,15 @@ void GuiManager::render_control_panel(const OsdStats& stats) {
         }
     }
 
-    // CLKIN Status
-    if (stats.clkin_locked) {
+    // CLKIN Status (external clock locked)
+    if (cfg_.show_clkin && stats.clkin_locked) {
         ImGui::PushStyleColor(ImGuiCol_Text, col_clkin);
         ImGui::Text("[CLKIN] LOCKED");
         ImGui::PopStyleColor();
     }
 
-    // Stats
-    {
+    // Stats (frames, dropped, clipping, latency)
+    if (cfg_.show_stats) {
         char buf[256];
         std::snprintf(buf, sizeof(buf),
                       "Frames: %llu  Dropped: %llu  Clipped: %s  Latency: %.0f ms",

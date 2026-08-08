@@ -70,6 +70,10 @@ void usage() {
         "  --overlay-margin X,Y  X and Y margin in pixels (default 8)\n"
         "  --overlay-top         position overlay at top (default)\n"
         "  --overlay-bottom      position overlay at bottom\n"
+        "  --no-signal           hide signal quality bars (ring/chroma)\n"
+        "  --no-agc              hide manual AGC gain info\n"
+        "  --no-clkin            hide CLKIN status\n"
+        "  --no-stats            hide frame/dropped/latency stats\n"
         "\nkeys (SDL mode only): q/ESC quit, a gain auto/manual, l/L LNA, g/G VGA, b RF amp,\n"
         "      c color, o OSD on/off, s screenshot, h help,\n"
         "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ\n");
@@ -171,6 +175,10 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         }
         else if (a == "--overlay-top") cfg->overlay_position = Config::OverlayPos::Top;
         else if (a == "--overlay-bottom") cfg->overlay_position = Config::OverlayPos::Bottom;
+        else if (a == "--no-signal") cfg->show_signal = false;
+        else if (a == "--no-agc") cfg->show_agc = false;
+        else if (a == "--no-clkin") cfg->show_clkin = false;
+        else if (a == "--no-stats") cfg->show_stats = false;
         else if (a == "--help" || a == "-h") { usage(); std::exit(0); }
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return false; }
     }
