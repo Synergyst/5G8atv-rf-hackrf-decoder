@@ -20,6 +20,57 @@ running on the laptop (Betaflight OSD visible):
 
 ![Setup: HackRF One + whoop + fpvdec live decode](docs/IMG_9715.jpeg)
 
+## Noise Reduction Filters
+
+fpvdec includes a modular post-frame denoise pipeline that removes RF noise
+and static artifacts from decoded frames. Three filter types are available:
+
+### Spatial Denoise (3×3 Median)
+
+Removes isolated bright/dark pixels (salt-and-pepper noise) using a 3×3 median
+filter on the luminance channel. Preserves edges while eliminating single-pixel
+noise.
+
+```sh
+./build/fpvdec --channel F4 --denoise 0.6   # 60% median blend
+```
+
+### Temporal Median (N-Frame Median)
+
+Removes horizontal static lines and frame-level artifacts by collecting Y
+values from the last N frames per pixel and picking the median. Random
+static lines appear in only 1 frame, so across 5 frames the median rejects
+them. This is the same technique analog TVs used with a one-field delay line.
+
+```sh
+./build/fpvdec --channel F4 --denoise-temporal-median 5   # 5 frames
+./build/fpvdec --channel F4 --denoise-temporal-median 7   # stronger cleanup
+```
+
+### Temporal IIR (Infinite Impulse Response)
+
+Lightweight frame-to-frame averaging that smooths fine grain. Adds ~1 frame
+of latency but is nearly free on CPU. Best paired with spatial denoise for
+comprehensive noise reduction.
+
+```sh
+./build/fpvdec --channel F4 --denoise 0.6 --denoise-temporal 0.3
+```
+
+Combine filters for maximum cleanup:
+
+```sh
+./build/fpvdec --channel F4 --denoise 0.6 --denoise-temporal-median 5 --denoise-temporal 0.3
+```
+
+| Filter | Removes | Latency | CPU Cost |
+|---|---|---|---|
+| `--denoise` | Single-pixel noise (salt-and-pepper) | Zero | Low (~1-2ms/frame) |
+| `--denoise-temporal-median` | Horizontal static lines, frame artifacts | ~N/2 frames | Medium (~5-10ms/frame) |
+| `--denoise-temporal` | Fine grain, residual noise | ~1 frame | Low (~1ms/frame) |
+
+---
+
 ## Supported channels
 
 All 40 standard 5.8 GHz analog FPV channels, selected as band letter +
@@ -211,6 +262,10 @@ cmake --build build -j
 | `--mode color\|gray` | decode mode (default color) |
 | `--sat F` / `--hue DEG` | color trims |
 | `--overscan F` | horizontal crop per side (default 0 — FPV OSD sits at the edges) |
+| `--denoise F` | spatial 3×3 median denoise, 0.0=off, 1.0=full (default 0.0) |
+| `--denoise-temporal F` | temporal IIR denoise blend, 0.0=off, 1.0=full (default 0.0) |
+| `--denoise-temporal-median N` | N-frame temporal median, 0=off, odd values 3-9 (default 0) |
+| `--denoise-temporal-median-strength F` | blend strength 0.0-1.0 (default 1.0) |
 | `--record PATH` | tee raw IQ to .cs8 while decoding |
 | `--dump-frames PREFIX` / `--frames N` | headless PPM frame dump |
 | `--dump-composite PATH` | dump post-AGC composite as f32 (debug) |
@@ -292,7 +347,29 @@ HackRF One (10 MSPS, tuned to the channel; AFC re-centers on the VTX)
   → flywheel line PLL with interlace-aware half-line re-anchoring
   → 3.58 MHz chroma BPF, per-line burst measurement, U/V demod
   → YUV→RGB configurable resolution (fields line-doubled, ~59.94 updates/s)
-  → triple buffer → GUI display (ImGui or SDL)
+  → triple buffer → [optional: denoise pipeline] → GUI display (ImGui or SDL)
+
+### Post-frame filter pipeline
+
+After decoding, frames pass through an optional denoise pipeline before
+rendering. The pipeline is modular — each filter implements the `IFilter`
+interface and can be independently enabled or disabled:
+
+```
+TripleBuffer.acquire()
+  → Frame (RGBA)
+  → [optional: Denoiser (3×3 median on Y)]
+  → [optional: TemporalMedian (N-frame median on Y)]
+  → [optional: TemporalFilter (IIR blend on Y)]
+  → SdlDisplay.render() or GuiManager.render()
+  → SDL renderer → display
+```
+
+| Filter | Removes | Latency | CPU Cost |
+|---|---|---|---|
+| `--denoise` | Single-pixel noise (salt-and-pepper) | Zero | Low (~1-2ms/frame) |
+| `--denoise-temporal-median` | Horizontal static lines, frame artifacts | ~N/2 frames | Medium (~5-10ms/frame) |
+| `--denoise-temporal` | Fine grain, residual noise | ~1 frame | Low (~1ms/frame) |
 
 The output resolution is configurable via `--resolution WxH` (default 640×480)
 and supports aspect ratio presets (`--aspect 16:9`, `--aspect 4:3`, etc.).

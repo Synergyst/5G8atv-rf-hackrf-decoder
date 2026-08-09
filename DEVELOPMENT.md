@@ -22,6 +22,15 @@ src/
 │   ├── dc_blocker.hpp    ← DC offset removal
 │   ├── nco.hpp           ← Numerically controlled oscillator
 │   └── sync.hpp          ← Sync separator + PLL
+├── filter/
+│   ├── filter.hpp        ← IFilter interface, FilterPipeline, FilterRegistry
+│   ├── filter.cpp        ← Pipeline implementation + registry
+│   ├── denoiser.hpp      ← Spatial 3×3 median on luminance (Y) channel
+│   ├── denoiser.cpp      ← Denoiser auto-registration
+│   ├── temporal.hpp      ← Temporal IIR blend on Y channel
+│   ├── temporal.cpp      ← TemporalFilter auto-registration
+│   ├── temporal_median.hpp ← N-frame temporal median on Y channel
+│   └── temporal_median.cpp ← TemporalMedian auto-registration
 ├── source/
 │   ├── sample_source.hpp ← Abstract input interface
 │   ├── hackrf_source.cpp ← HackRF One input
@@ -50,6 +59,7 @@ main.cpp
   ├── ISampleSource → HackRfSource / FileSource
   ├── NtscDecoder (dsp/ntsc_decoder.cpp)
   ├── TripleBuffer (dsp/frame.hpp)
+  ├── FilterPipeline (filter/filter.cpp)
   ├── SdlDisplay (ui/sdl_display.cpp)
   └── GuiManager (ui/gui_manager.cpp)
 ```
@@ -69,7 +79,10 @@ HackRF / File → complex IQ → DC blocker → channel LPF → FM discriminator
 ### Data flow (UI thread):
 
 ```
-TripleBuffer.acquire() → Frame (RGBA) → SdlDisplay.render() or GuiManager.render()
+TripleBuffer.acquire()
+  → Frame (RGBA)
+  → [optional: FilterPipeline.process()]
+  → SdlDisplay.render() or GuiManager.render()
   → SDL renderer → display
 ```
 
@@ -91,6 +104,59 @@ TripleBuffer.acquire() → Frame (RGBA) → SdlDisplay.render() or GuiManager.re
 
 - **GuiManager** — Dear ImGui overlay rendered on top of SDL. Transparent
   windows, no chrome, positioned by `Config::overlay_position`.
+
+### Filter Pipeline Architecture
+
+The post-frame denoise pipeline is modular and extensible:
+
+```
+IFilter (abstract interface)
+  ├── Denoiser          — 3×3 median on Y channel
+  ├── TemporalFilter    — IIR blend with previous frame on Y
+  └── TemporalMedian    — N-frame median on Y (removes horizontal lines)
+```
+
+**IFilter interface** (`src/filter/filter.hpp`):
+```cpp
+class IFilter {
+    virtual void init(int width, int height) = 0;   // Configure for resolution
+    virtual void process(Frame& frame) = 0;          // In-place processing
+    virtual const char* name() const = 0;
+    virtual bool needs_reference_frame() const;
+    bool enabled() const;
+    void set_enabled(bool);
+};
+```
+
+**FilterPipeline** manages the chain:
+```cpp
+FilterPipeline pipeline;
+pipeline.add(new Denoiser());
+pipeline.add(new TemporalMedian());
+pipeline.init(width, height);
+pipeline.process(frame);  // applies in registration order
+```
+
+**FilterRegistry** enables auto-registration via the `REGISTER_FILTER` macro:
+```cpp
+// In filter.cpp:
+#include "filter_name.hpp"
+REGISTER_FILTER(FilterName)
+```
+This creates a factory and registers it at static initialization time.
+
+**Adding a new filter** requires:
+1. Create `src/filter/filter_name.hpp` with class inheriting `IFilter`
+2. Implement `init()` and `process()`
+3. Create `src/filter/filter_name.cpp` with `REGISTER_FILTER(FilterName)`
+4. Add `.cpp` to `CMakeLists.txt`
+5. Add CLI config fields and wiring in `main.cpp`
+
+**Frame ownership**: The pipeline takes `Frame&` by non-const reference and modifies
+it in-place. The pipeline holds an optional reference frame copy for filters that
+need temporal context (via `needs_reference_frame()` returning true).
+
+---
 
 ---
 
@@ -149,6 +215,33 @@ the window dimensions. If the resolution changes, you must call
 `disp.rebuild_crt_lut(width, height)` to rebuild it. The LUT is a member
 of `SdlDisplay`, not a global singleton.
 
+### 3.6. Filter pipeline resolution changes
+
+When resolution changes (e.g., via `--auto-res`), the filter pipeline must
+be re-initialized to match the new dimensions. Call `pipeline.init(new_w, new_h)`
+after resizing the TripleBuffer but before processing frames.
+
+**Correct order:**
+```cpp
+tb.resize(new_width, new_height);    // Resize frame buffers first
+pipeline.init(new_width, new_height); // Reinitialize all filters
+```
+
+Filters maintain internal buffers (e.g., `TemporalMedian`'s circular buffer)
+that are reallocated on `init()`.
+
+### 3.7. Register macro namespace qualification
+
+The `REGISTER_FILTER(Class)` macro generates code in an anonymous namespace
+**outside** `famidec::`. If your filter class is in `famidec::`, the macro
+has been updated to use `new famidec::Class()` internally. Do not manually
+qualify the class name in the macro call — just pass the class name:
+
+```cpp
+REGISTER_FILTER(MyFilter)  // correct
+// not: REGISTER_FILTER(famidec::MyFilter)
+```
+
 ### 3.6. synth_fm.cpp breaks when Frame dimensions change
 
 The E2E test `tests/synth_fm.cpp` directly accesses `Frame::kWidth` and
@@ -178,7 +271,71 @@ else if (a == "--enable-feature") cfg->feature_enabled = true;
 
 ---
 
-## 5. Adding a New Display Feature
+## 5. Adding a New Filter
+
+Filters extend the post-frame denoise pipeline. Each filter operates in-place on the `Frame` and modifies the `rgba` vector directly.
+
+**Step-by-step:**
+
+1. **Create `src/filter/filter_name.hpp`** — Declare your class inheriting `IFilter`:
+   ```cpp
+   #pragma once
+   #include "filter.hpp"
+
+   namespace famidec {
+   class MyFilter : public IFilter {
+   public:
+       void init(int width, int height) override { w_ = width; h_ = height; /* allocate buffers */ }
+       void process(Frame& frame) override { /* modify frame.rgba in-place */ }
+       const char* name() const override { return "my_filter"; }
+       // Optional: bool needs_reference_frame() const override { return true; }
+       void set_strength(float s) { strength_ = s; }
+   private:
+       int w_ = 0, h_ = 0;
+       float strength_ = 0.0f;
+       std::vector<float> buf_;  // working buffer
+   };
+   }  // namespace famidec
+   ```
+
+2. **Create `src/filter/filter_name.cpp`** — Register the filter:
+   ```cpp
+   #include "filter_name.hpp"
+   REGISTER_FILTER(MyFilter)
+   ```
+
+3. **Add `.cpp` to `CMakeLists.txt`** in the `fpvdec` target (near line 60):
+   ```cmake
+   src/filter/filter_name.cpp
+   ```
+
+4. **Add config fields** to `Config` in `config.hpp`:
+   ```cpp
+   float my_filter_strength = 0.0f;  // 0.0 = off, 1.0 = full
+   ```
+
+5. **Parse CLI** in `parse_args()` in `main.cpp`:
+   ```cpp
+   else if (a == "--my-filter-strength") {
+       cfg->my_filter_strength = std::atof(next("--my-filter-strength"));
+       cfg->my_filter_strength = std::clamp(cfg->my_filter_strength, 0.0f, 1.0f);
+   }
+   ```
+
+6. **Wire into pipeline** in `main.cpp` (around line 617, after temporal median):
+   ```cpp
+   if (mcfg.my_filter_strength > 0.0f) {
+       auto* f = new MyFilter();
+       f->set_strength(mcfg.my_filter_strength);
+       pipeline.add(f);
+   }
+   ```
+
+7. **Update README.md** in the Noise Reduction Filters section with usage examples.
+
+---
+
+## 6. Adding a New Display Feature
 
 1. **Modify `Frame`** if you need new data in the output frame.
 2. **Update `NtscDecoder::process()`** to compute the new data.

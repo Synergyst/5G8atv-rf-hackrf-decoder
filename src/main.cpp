@@ -19,6 +19,10 @@
 #include "dsp/frame.hpp"
 #include "dsp/nco.hpp"
 #include "dsp/ntsc_decoder.hpp"
+#include "filter/denoiser.hpp"
+#include "filter/filter.hpp"
+#include "filter/temporal.hpp"
+#include "filter/temporal_median.hpp"
 #include "source/file_source.hpp"
 #include "source/hackrf_source.hpp"
 #include "source/sample_source.hpp"
@@ -58,6 +62,10 @@ void usage() {
         "  --no-amp              disable the +14 dB RF preamp (default on)\n"
         "  --mode color|gray     decode mode (default color)\n"
         "  --sat F --hue DEG     color trims\n"
+        "  --denoise F           spatial denoise 0.0..1.0 (default 0.0)\n"
+        "  --denoise-temporal F  temporal IIR denoise 0.0..1.0 (default 0.0)\n"
+        "  --denoise-temporal-median N  N-frame temporal median, N=3..9 (default 0=off)\n"
+        "  --denoise-temporal-median-strength S  blend strength 0.0..1.0 (default 1.0)\n"
         "  --overscan F          horizontal crop per side 0..0.15 (default 0)\n"
         "  --record PATH         tee raw IQ to .cs8 while decoding\n"
         "  --dump-composite PATH write post-AGC composite as f32\n"
@@ -157,6 +165,23 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         else if (a == "--overscan") cfg->overscan = std::atof(next("--overscan"));
         else if (a == "--sat") cfg->saturation = std::atof(next("--sat"));
         else if (a == "--hue") cfg->hue_deg = std::atof(next("--hue"));
+        else if (a == "--denoise") {
+            cfg->denoise = std::atof(next("--denoise"));
+            cfg->denoise = std::clamp(cfg->denoise, 0.0f, 1.0f);
+        }
+        else if (a == "--denoise-temporal") {
+            cfg->denoise_temporal = std::atof(next("--denoise-temporal"));
+            cfg->denoise_temporal = std::clamp(cfg->denoise_temporal, 0.0f, 1.0f);
+        }
+        else if (a == "--denoise-temporal-median") {
+            cfg->denoise_temporal_median = std::atoi(next("--denoise-temporal-median"));
+            cfg->denoise_temporal_median = std::clamp(cfg->denoise_temporal_median, 0, 9);
+            if (cfg->denoise_temporal_median % 2 == 0) cfg->denoise_temporal_median++;  // Ensure odd
+        }
+        else if (a == "--denoise-temporal-median-strength") {
+            cfg->denoise_temporal_median_strength = std::atof(next("--denoise-temporal-median-strength"));
+            cfg->denoise_temporal_median_strength = std::clamp(cfg->denoise_temporal_median_strength, 0.0f, 1.0f);
+        }
         else if (a == "--record") cfg->record_path = next("--record");
         else if (a == "--dump-composite") cfg->dump_composite_path = next("--dump-composite");
         else if (a == "--dump-frames") { cfg->dump_frames_prefix = next("--dump-frames"); cfg->headless = true; }
@@ -575,6 +600,27 @@ int main(int argc, char** argv) {
         }
 
         Config& mcfg = cfg;
+
+        // Build the filter pipeline from config.
+        // Filters are auto-registered via REGISTER_FILTER() macro.
+        FilterPipeline pipeline;
+        if (mcfg.denoise > 0.0f) {
+            auto* denoise = new Denoiser();
+            denoise->set_strength(mcfg.denoise);
+            pipeline.add(denoise);
+        }
+        if (mcfg.denoise_temporal > 0.0f) {
+            auto* temporal = new TemporalFilter();
+            temporal->set_alpha(mcfg.denoise_temporal);
+            pipeline.add(temporal);
+        }
+        if (mcfg.denoise_temporal_median > 0) {
+            auto* tmed = new TemporalMedian();
+            tmed->set_frames(mcfg.denoise_temporal_median);
+            tmed->set_strength(mcfg.denoise_temporal_median_strength);
+            pipeline.add(tmed);
+        }
+        pipeline.init(mcfg.frame_width, mcfg.frame_height);
         int shot = 0;
         Frame last_shown;
         bool have_shown = false;
@@ -708,8 +754,9 @@ int main(int argc, char** argv) {
                 mcfg.frame_height = target_height;
                 mcfg.auto_res_applied = true;
                 
-                // Resize the pipeline
+                // Resize the pipeline and filters
                 tb.resize(mcfg.frame_width, mcfg.frame_height);
+                pipeline.init(mcfg.frame_width, mcfg.frame_height);
                 disp.rebuild_crt_lut(mcfg.frame_width, mcfg.frame_height);
                 
                 // Report what we detected
@@ -800,7 +847,16 @@ int main(int argc, char** argv) {
             // Render
             float gui_screenshot = 0.0f;
             if (use_imgui) {
-                disp.render_video_only(f);
+                // Apply filter pipeline if enabled
+                if (pipeline.empty()) {
+                    disp.render_video_only(f);
+                } else {
+                    Frame filtered;
+                    filtered.resize(mcfg.frame_width, mcfg.frame_height);
+                    filtered.rgba = f->rgba;
+                    pipeline.process(filtered);
+                    disp.render_video_only(&filtered);
+                }
                 gui_screenshot = gui.render(st);
                 SDL_RenderPresent(disp.renderer());
                 if (gui_screenshot > 0.0f && have_shown) {
@@ -809,7 +865,16 @@ int main(int argc, char** argv) {
                     std::printf("saved %s\n", path);
                 }
             } else {
-                disp.render(f, st);
+                // Apply filter pipeline if enabled
+                if (pipeline.empty()) {
+                    disp.render(f, st);
+                } else {
+                    Frame filtered;
+                    filtered.resize(mcfg.frame_width, mcfg.frame_height);
+                    filtered.rgba = f->rgba;
+                    pipeline.process(filtered);
+                    disp.render(&filtered, st);
+                }
             }
         }
         if (use_imgui) gui.shutdown();

@@ -56,6 +56,10 @@ add_executable(fpvdec
     src/source/hackrf_source.cpp
     src/ui/sdl_display.cpp
     src/ui/gui_manager.cpp
+    src/filter/filter.cpp
+    src/filter/denoiser.cpp
+    src/filter/temporal.cpp
+    src/filter/temporal_median.cpp
 )
 
 # Add SoapySDR source and dependencies if enabled

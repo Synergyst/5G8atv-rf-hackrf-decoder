@@ -55,6 +55,15 @@ struct Config {
     float saturation = 1.0f;
     float hue_deg = 0.0f;
 
+    // Post-frame denoise pipeline.
+    // Spatial: 3×3 median on Y (removes isolated snow pixels)
+    // Temporal median: N-frame median on Y (removes horizontal static lines)
+    // Temporal IIR: weak, legacy
+    float denoise = 0.0f;             // spatial 3×3 median strength, 0.0=off
+    float denoise_temporal = 0.0f;    // temporal IIR strength (legacy, weak)
+    int denoise_temporal_median = 0;  // N-frame temporal median, 0=off, 3-9 (odd)
+    float denoise_temporal_median_strength = 1.0f;  // blend strength 0..1
+
     // Horizontal overscan crop, fraction of the active line removed from
     // EACH side. 0 = show the full active line: FPV cameras put OSD text
     // right at the edges (TV-style hiding was 0.047).
