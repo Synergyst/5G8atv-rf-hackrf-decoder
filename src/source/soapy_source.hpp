@@ -22,6 +22,8 @@ public:
 
     bool start() override;
     void stop() override;
+    void pause() override;
+    void resume() override;
     size_t read(uint8_t* buf, size_t len) override;
 
     uint64_t dropped_bytes() const override {

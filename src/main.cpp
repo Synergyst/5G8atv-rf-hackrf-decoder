@@ -420,7 +420,7 @@ int main(int argc, char** argv) {
         src = std::make_unique<FileSource>(cfg, !cfg.headless && !cfg.spectrum);
     }
     if (!src->start()) {
-        std::fprintf(stderr, "failed to start input source%s%s\n", hackrf ? ": " : "", hackrf ? hackrf->error().c_str() : "");
+        std::fprintf(stderr, "failed to start input source: %s\n", src->error().c_str());
         return 1;
     }
     // CLKIN check: if enforcement is requested, verify external clock is locked
@@ -459,10 +459,76 @@ int main(int argc, char** argv) {
     }
 
     TripleBuffer tb;
-    tb.resize(cfg.frame_width, cfg.frame_height);
-    NtscDecoder dec(cfg, tb);
+    NtscDecoder* dec = nullptr;
     std::atomic<float> mean_raw{0.0f};
-    std::thread dsp(dsp_thread, std::cref(cfg), src.get(), &dec, &rec, &mean_raw);
+    std::thread dsp;
+
+    // Auto-resolution: detect before starting DSP thread
+    Config auto_cfg = cfg;
+    if (cfg.auto_detect) {
+        // Start DSP briefly to detect resolution
+        TripleBuffer tmp_tb;
+        tmp_tb.resize(cfg.frame_width, cfg.frame_height);
+        NtscDecoder tmp_dec(auto_cfg, tmp_tb);
+        std::atomic<float> tmp_mean_raw{0.0f};
+        std::thread tmp_dsp(dsp_thread, std::cref(auto_cfg), src.get(), &tmp_dec, &rec, &tmp_mean_raw);
+        
+        // Wait for detection (max 10 seconds)
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!tmp_dec.stats().auto_detect_ready.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        
+        // Stop DSP thread and restart source stream cleanly.
+        // For SoapySDR/UHD, we must not just flip g_running — the readStream()
+        // call may be blocked inside the UHD library and won't see the flag.
+        // pause()/resume() re-activate the stream to unblock it, then restart.
+        src->pause();
+        tmp_dsp.join();
+        src->resume();
+        g_running.store(true, std::memory_order_relaxed);
+        
+        // Apply detected resolution
+        double chroma_hz = tmp_dec.stats().detected_chroma_hz.load(std::memory_order_acquire);
+        int active_lines = tmp_dec.stats().detected_active_lines.load(std::memory_order_acquire);
+        int horiz_detail = tmp_dec.stats().detected_horiz_detail.load(std::memory_order_acquire);
+        bool is_pal = (chroma_hz > 4.0e6);
+        if (active_lines <= 0) active_lines = is_pal ? 288 : 240;
+        
+        int target_width = cfg.frame_width;
+        int target_height = cfg.frame_height;
+        if (auto_cfg.aspect_ratio == Config::AspectRatio::R16_9) {
+            target_width = static_cast<int>(target_height * 16.0 / 9.0 + 0.5);
+        } else if (auto_cfg.aspect_ratio == Config::AspectRatio::R16_10) {
+            target_width = static_cast<int>(target_height * 16.0 / 10.0 + 0.5);
+        } else if (auto_cfg.aspect_ratio == Config::AspectRatio::R5_4) {
+            target_width = static_cast<int>(target_height * 5.0 / 4.0 + 0.5);
+        } else if (auto_cfg.aspect_ratio == Config::AspectRatio::R4_3) {
+            target_width = static_cast<int>(target_height * 4.0 / 3.0 + 0.5);
+        }
+        if (auto_cfg.aspect_ratio == Config::AspectRatio::Custom) {
+            target_width = cfg.frame_width;
+            target_height = cfg.frame_height;
+        }
+        
+        auto_cfg.frame_width = target_width;
+        auto_cfg.frame_height = target_height;
+        auto_cfg.auto_res_applied = true;
+        
+        std::printf("AUTO-RES: detected %s (chroma=%.2f MHz, %d active lines, "
+                   "horiz_detail=%d, line_rate=%.3f kHz)\n",
+                   is_pal ? "PAL" : "NTSC",
+                   chroma_hz / 1e6, active_lines,
+                   horiz_detail, tmp_dec.stats().detected_line_rate.load() / 1000.0);
+        std::printf("  -> applying resolution: %dx%d\n", 
+                   target_width, target_height);
+        std::fflush(stdout);
+    }
+    
+    tb.resize(auto_cfg.frame_width, auto_cfg.frame_height);
+    dec = new NtscDecoder(auto_cfg, tb);
+    dsp = std::thread(dsp_thread, std::cref(auto_cfg), src.get(), dec, &rec, &mean_raw);
 
     int rc = 0;
     if (cfg.headless) {
@@ -483,12 +549,12 @@ int main(int argc, char** argv) {
         }
         std::printf("wrote %d frames; decoded lines=%llu coasted=%llu frames=%llu\n",
                     written,
-                    static_cast<unsigned long long>(dec.stats().lines.load()),
-                    static_cast<unsigned long long>(dec.stats().lines_coasted.load()),
-                    static_cast<unsigned long long>(dec.stats().frames.load()));
-        if (dec.stats().line_locked.load())
+                    static_cast<unsigned long long>(dec->stats().lines.load()),
+                    static_cast<unsigned long long>(dec->stats().lines_coasted.load()),
+                    static_cast<unsigned long long>(dec->stats().frames.load()));
+        if (dec->stats().line_locked.load())
             std::printf("carrier offset: %+.2f MHz from tuned center (live AFC would re-tune; or use --freq)\n",
-                        carrier_offset_hz(dec, cfg) / 1e6);
+                        carrier_offset_hz(*dec, cfg) / 1e6);
         if (written == 0) rc = 1;
     } else {
         bool use_imgui = (cfg.gui_mode == Config::GuiMode::ImGui);
@@ -579,13 +645,13 @@ int main(int argc, char** argv) {
 
             // Build stats from decoder and source
             OsdStats st;
-            st.line_locked = dec.stats().line_locked.load();
-            st.burst_amp = dec.stats().burst_amp.load();
+            st.line_locked = dec->stats().line_locked.load();
+            st.burst_amp = dec->stats().burst_amp.load();
             st.ring_fill = src->ring_fill();
             st.dropped = src->dropped_bytes();
             st.clipped = src->clipped_samples();
-            st.frames = dec.stats().frames.load();
-            st.lines = dec.stats().lines.load();
+            st.frames = dec->stats().frames.load();
+            st.lines = dec->stats().lines.load();
             if (hackrf) { st.lna = hackrf->lna(); st.vga = hackrf->vga(); }
             st.amp = mcfg.amp;
             st.gain_auto = mcfg.gain_auto;
@@ -593,11 +659,11 @@ int main(int argc, char** argv) {
             
             // Auto-resolution: apply detected resolution after lock is acquired
             if (mcfg.auto_detect && !mcfg.auto_res_applied && 
-                dec.stats().auto_detect_ready.load(std::memory_order_acquire)) {
-                double chroma_hz = dec.stats().detected_chroma_hz.load(std::memory_order_acquire);
-                int active_lines = dec.stats().detected_active_lines.load(std::memory_order_acquire);
-                int horiz_detail = dec.stats().detected_horiz_detail.load(std::memory_order_acquire);
-                int line_rate_mhz = dec.stats().detected_line_rate.load(std::memory_order_acquire);
+                dec->stats().auto_detect_ready.load(std::memory_order_acquire)) {
+                double chroma_hz = dec->stats().detected_chroma_hz.load(std::memory_order_acquire);
+                int active_lines = dec->stats().detected_active_lines.load(std::memory_order_acquire);
+                int horiz_detail = dec->stats().detected_horiz_detail.load(std::memory_order_acquire);
+                int line_rate_mhz = dec->stats().detected_line_rate.load(std::memory_order_acquire);
                 
                 // Determine standard from chroma frequency
                 bool is_pal = (chroma_hz > 4.0e6);  // PAL ~4.43 MHz vs NTSC ~3.58 MHz
@@ -693,7 +759,7 @@ int main(int argc, char** argv) {
                 if (locked != was_locked) { was_locked = locked; lock_changed = now; afc_meas.clear(); }
                 if (cfg.afc && hackrf && now - last_afc >= std::chrono::milliseconds(500) && now - lock_changed >= std::chrono::seconds(2)) {
                     last_afc = now;
-                    afc_meas.push_back(locked ? carrier_offset_hz(dec, cfg) :
+                    afc_meas.push_back(locked ? carrier_offset_hz(*dec, cfg) :
                         (cfg.invert ? 1.0 : -1.0) * static_cast<double>(mean_raw.load()) * cfg.fm_dev_hz);
                     if (afc_meas.size() >= 3) {
                         std::sort(afc_meas.begin(), afc_meas.end());
@@ -707,7 +773,7 @@ int main(int argc, char** argv) {
                             double step = std::clamp(med, -clampv, clampv);
                             mcfg.video_carrier_hz += step;
                             hackrf->set_center_freq(mcfg.center_hz());
-                            dec.shift_levels(static_cast<float>((cfg.invert ? -step : step) / cfg.fm_dev_hz));
+                            dec->shift_levels(static_cast<float>((cfg.invert ? -step : step) / cfg.fm_dev_hz));
                             channel = fpv_nearest_channel(mcfg.video_carrier_hz);
                             std::printf("AFC%s: %+0.2f MHz -> %.2f MHz\n", locked ? "" : " (coarse)", step / 1e6, mcfg.video_carrier_hz / 1e6);
                             std::fflush(stdout);
@@ -720,8 +786,8 @@ int main(int argc, char** argv) {
             st.recording = rec.active();
             st.rec_seconds = rec.seconds();
             if (st.vsync_locked) {
-                uint64_t dsp_samples = dec.stats().samples_in.load();
-                uint64_t vsync_pos = dec.stats().frame_sample_pos.load();
+                uint64_t dsp_samples = dec->stats().samples_in.load();
+                uint64_t vsync_pos = dec->stats().frame_sample_pos.load();
                 if (dsp_samples > vsync_pos)
                     st.video_latency_ms = static_cast<float>(
                         (static_cast<double>(dsp_samples - vsync_pos) +

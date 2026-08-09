@@ -88,11 +88,48 @@ status line across the top, and a red `CLIP` indicator on ADC clipping.
 
 ## Hardware
 
+### Native HackRF One
+
 [HackRF One](https://greatscottgadgets.com/hackrf/one/) receive-only at
 10 MSPS. The stock whip antenna works at desk range; for real distance use
 a **5.8 GHz circular-polarized patch/helical antenna** — FPV VTX are
 circular-polarized, so a linear whip loses 3 dB plus deep multipath fades.
 The +14 dB RF amp is enabled by default (`--no-amp` to disable).
+
+### SoapySDR Devices
+
+fpvdec supports **SoapySDR-compatible SDRs** for broader hardware support. This includes the
+[LibreSDR B220mini](https://libresdr.org/) (USRP B210 compatible), LimeSDR, USRP B-series,
+and other SoapySDR devices.
+
+**Supported devices (via SoapySDR):**
+
+| Device | Notes |
+|---|---|
+| **LibreSDR B220mini** | B210 compatible, GPSDO capable, excellent for FPV |
+| **USRP B210** | Original Ettus research board |
+| **LimeSDR** | Multiple variants (USB, Mini, IoT) |
+| **HackRF One** | Also works via SoapyHackRF driver |
+
+**To use SoapySDR devices:**
+
+```sh
+# List available devices
+# (SoapySDRUtil --info)
+
+# Use LibreSDR B220mini (USRP device)
+./build/fpvdec --source soapysdr --device "driver=uhd"
+
+# Specify IP address for networked USRP
+./build/fpvdec --source soapysdr --device "driver=uhd,addr=192.168.10.2"
+
+# Use with specific serial number
+./build/fpvdec --source soapysdr --device "driver=uhd,serial=xxxxxx"
+```
+
+**Note:** When using SoapySDR mode, HackRF-specific options like `--no-amp`,
+`--enforce-clkin`, and `--no-clkout` may not be applicable, as gain control
+and clocking are device-dependent.
 
 ## Build
 

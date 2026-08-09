@@ -12,6 +12,11 @@ public:
     virtual ~ISampleSource() = default;
     virtual bool start() = 0;
     virtual void stop() = 0;
+    // Pause/resume the data flow without destroying the device.
+    // Used during auto-resolution detection to safely interrupt a blocked
+    // readStream() call and restart cleanly.
+    virtual void pause() {}
+    virtual void resume() {}
     // Blocking read of interleaved int8 IQ bytes. Returns bytes read;
     // 0 means end of stream.
     virtual size_t read(uint8_t* buf, size_t len) = 0;
@@ -24,6 +29,10 @@ public:
     virtual uint64_t buffered_bytes() const { return 0; }
     virtual uint64_t clipped_samples() const { return 0; }
     virtual float ring_fill() const { return 0.0f; }
+    // Returns error message if start() failed, empty string otherwise
+    virtual const std::string& error() const { return empty_error_; }
+private:
+    std::string empty_error_;
 };
 
 }  // namespace famidec

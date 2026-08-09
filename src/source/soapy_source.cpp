@@ -12,8 +12,9 @@ namespace famidec {
 
 namespace {
 constexpr size_t kRingBytes = 1u << 25;  // 32 MiB ~ 1.6 s at 10 MSPS
-constexpr const char* kSampleFormat = SOAPY_SDR_CS8;  // Complex 8-bit
-constexpr int kReadTimeoutMs = 1000;  // 1 second timeout
+constexpr size_t kReadBatchSamples = 1 << 14;  // 16384 complex samples per read (~1.6ms at 10 MSPS)
+constexpr const char* kSampleFormat = SOAPY_SDR_CS16;  // Complex 16-bit (native B210 format)
+constexpr long kReadTimeoutUs = 100000;  // 100ms timeout in microseconds
 }  // namespace
 
 SoapySource::SoapySource(const Config& cfg, const std::string& device_args)
@@ -161,19 +162,17 @@ bool SoapySource::start() {
 }
 
 void SoapySource::stop() {
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!device_) return;
-        
-        running_.store(false, std::memory_order_relaxed);
-        
-        try {
-            if (stream_) {
-                device_->deactivateStream(stream_, 0, 0);
-            }
-        } catch (...) {
-            // Ignore errors during shutdown
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!device_) return;
+    
+    running_.store(false, std::memory_order_relaxed);
+    
+    try {
+        if (stream_) {
+            device_->deactivateStream(stream_, 0, 0);
         }
+    } catch (...) {
+        // Ignore errors during shutdown
     }
 
     // Cleanup
@@ -191,53 +190,105 @@ void SoapySource::stop() {
     }
 }
 
+void SoapySource::pause() {
+    // Just flip the running flag without touching the device.
+    // The DSP thread will see running_ == false and return from read(),
+    // allowing readStream() to timeout gracefully.
+    running_.store(false, std::memory_order_release);
+}
+
+void SoapySource::resume() {
+    // Restart the stream without recreating the device.
+    // This is safe to call after pause() even if a readStream() call
+    // is blocked.
+    std::lock_guard<std::mutex> lk(mu_);
+    running_.store(true, std::memory_order_relaxed);
+    
+    if (device_ && stream_) {
+        try {
+            // Re-activate the stream so readStream() will unblock
+            device_->deactivateStream(stream_, 0, 0);
+            device_->activateStream(stream_, 0, 0, 0);
+        } catch (...) {
+            // Ignore
+        }
+    }
+}
+
 size_t SoapySource::read(uint8_t* buf, size_t len) {
     if (!running_.load(std::memory_order_relaxed)) return 0;
 
     size_t got = 0;
-    
+
+    // Pre-allocate buffer outside loop to avoid repeated allocation
+    std::vector<int16_t> samples(kRingBytes / 2);
+
     while (got < len && running_.load(std::memory_order_relaxed)) {
         // Try to get data from ring buffer first
         size_t n = ring_.pop(buf + got, len - got);
         got += n;
         if (n > 0) continue;
-        
+
         // Ring buffer empty, read from device using blocking I/O
-        // SoapySDR CS8 format: complex 8-bit = {I0, Q0, I1, Q1, ...}
+        // SoapySDR CS16 format: complex 16-bit = {I0,Q0,I1,Q1,...} as int16_t pairs
         // readStream expects void* const* (array of buffer pointers)
-        std::vector<int8_t> samples(kRingBytes);
-        size_t nsamples = samples.size();
         void* buffers[] = {samples.data()};
-        
+        size_t nsamples = samples.size();  // in/out: requested / actual count
         int status = 0;
         long long timeNs = 0;
-        
+
         try {
-            size_t actual = device_->readStream(
+            int actual = device_->readStream(
                 stream_,
                 buffers,
                 nsamples,
                 status,
                 timeNs,
-                kReadTimeoutMs);
+                100000);  // 100ms timeout in microseconds
 
-            if (actual > 0) {
-                total_.fetch_add(actual * 2, std::memory_order_relaxed);
+            if (actual < 0) {
+                // Error: sleep briefly and retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            if (actual == 0) {
+                // No data available within timeout: sleep to avoid busy loop
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            {
+                // Convert CS16 (16-bit) to interleaved int8_t for fpvdec pipeline
+                // CS16: each complex sample = I16,Q16 (2 int16_t = 4 bytes)
+                static std::vector<uint8_t> converted(kRingBytes);
+                size_t out_idx = 0;
                 
-                // Clip detection
+                // Clip detection on 16-bit values
                 uint64_t clips = 0;
-                int mx = 0;
-                for (size_t i = 0; i < actual * 2; i += 64) {
-                    int v = samples[i];
-                    if (v < 0) v = -v;
-                    if (v > mx) mx = v;
-                    if (v >= 127) ++clips;
+                for (int i = 0; i < actual; i++) {
+                    int16_t i_sample = samples[i * 2];
+                    int16_t q_sample = samples[i * 2 + 1];
+                    
+                    // Convert 16-bit to 8-bit by taking upper byte (scale down)
+                    int8_t i8 = static_cast<int8_t>(i_sample >> 8);
+                    int8_t q8 = static_cast<int8_t>(q_sample >> 8);
+                    
+                    converted[out_idx++] = static_cast<uint8_t>(i8);
+                    converted[out_idx++] = static_cast<uint8_t>(q8);
+                    
+                    // Clip detection: values near ±32767 are clipped
+                    if (i_sample < -32000 || i_sample > 32000) clips++;
+                    if (q_sample < -32000 || q_sample > 32000) clips++;
                 }
+                
+                // Count raw bytes from device (4 bytes per complex sample in CS16)
+                total_.fetch_add(actual * 4, std::memory_order_relaxed);
+                
                 if (clips) clipped_.fetch_add(clips, std::memory_order_relaxed);
                 
-                // Push to ring buffer (samples is already I0,Q0,I1,Q1...)
-                if (!ring_.push(reinterpret_cast<const uint8_t*>(samples.data()), actual * 2)) {
-                    dropped_.fetch_add(actual * 2, std::memory_order_relaxed);
+                // Push converted 8-bit interleaved IQ data to ring buffer
+                if (!ring_.push(converted.data(), out_idx)) {
+                    dropped_.fetch_add(out_idx, std::memory_order_relaxed);
                 }
             }
         } catch (const std::exception& e) {
