@@ -40,6 +40,129 @@
 
 using namespace famidec;
 
+// ── Dynamic Config Event System ──────────────────────────────────────────────
+// Thread-safe queue for config changes from Web GUI to DSP thread.
+
+enum ConfigChangeType {
+    CFG_FM_DEV,
+    CFG_INVERT,
+    CFG_SATURATION,
+    CFG_HUE_DEG,
+    CFG_OVERSCAN,
+    CFG_VIDEO_LPF,
+    CFG_AFC,
+    CFG_DENOISE,
+    CFG_DENOISE_TEMPORAL,
+    CFG_DENOISE_MEDIAN,
+    CFG_DENOINE_MEDIAN_STRENGTH,
+    CFG_SAMPLE_RATE,
+    CFG_VIDEO_CARRIER,
+    CFG_OFFSET_HZ,
+    CFG_LNA_GAIN,
+    CFG_VGA_GAIN,
+    CFG_AMP,
+    CFG_GAIN_AUTO,
+    CFG_FRAME_WIDTH,
+    CFG_FRAME_HEIGHT,
+    CFG_AUTO_DETECT,
+    CFG_CLkout,
+    CFG_ENFORCE_CLKIN,
+};
+
+struct ConfigChangeEvent {
+    ConfigChangeType type;
+    union {
+        int int_val;
+        double dbl_val;
+        bool bool_val;
+        float flt_val;
+    } val;
+};
+
+class ConfigChangeQueue {
+public:
+    void push(const ConfigChangeEvent& event) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (events_.size() < 100) events_.push_back(event);
+    }
+
+    void push(const std::vector<ConfigChangeEvent>& src_events) {
+        for (auto& e : src_events) {
+            if (events_.size() < 100) events_.push_back(e);
+        }
+    }
+
+    bool has_events() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return !events_.empty();
+    }
+
+    bool pop(ConfigChangeEvent& out) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (events_.empty()) return false;
+        out = events_.front();
+        events_.erase(events_.begin());
+        return true;
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lk(mu_);
+        events_.clear();
+    }
+
+private:
+    std::mutex mu_;
+    std::vector<ConfigChangeEvent> events_;
+};
+
+// Helper to push config changes
+static void push_config(ConfigChangeQueue& queue, const Config& cfg) {
+    auto push_bool = [&](ConfigChangeType type, bool val) {
+        ConfigChangeEvent evt = {type};
+        evt.val.bool_val = val;
+        queue.push(evt);
+    };
+    auto push_double = [&](ConfigChangeType type, double val) {
+        ConfigChangeEvent evt = {type};
+        evt.val.dbl_val = val;
+        queue.push(evt);
+    };
+    auto push_float = [&](ConfigChangeType type, float val) {
+        ConfigChangeEvent evt = {type};
+        evt.val.flt_val = val;
+        queue.push(evt);
+    };
+    auto push_int = [&](ConfigChangeType type, int val) {
+        ConfigChangeEvent evt = {type};
+        evt.val.int_val = val;
+        queue.push(evt);
+    };
+
+    push_double(CFG_FM_DEV, cfg.fm_dev_hz);
+    push_bool(CFG_INVERT, cfg.invert);
+    push_float(CFG_SATURATION, cfg.saturation);
+    push_float(CFG_HUE_DEG, cfg.hue_deg);
+    push_float(CFG_OVERSCAN, cfg.overscan);
+    push_double(CFG_VIDEO_LPF, cfg.video_lpf_hz);
+    push_bool(CFG_AFC, cfg.afc);
+    push_float(CFG_DENOISE, cfg.denoise);
+    push_float(CFG_DENOISE_TEMPORAL, cfg.denoise_temporal);
+    push_int(CFG_DENOISE_MEDIAN, cfg.denoise_temporal_median);
+    push_float(CFG_DENOINE_MEDIAN_STRENGTH, cfg.denoise_temporal_median_strength);
+    push_double(CFG_SAMPLE_RATE, cfg.sample_rate);
+    push_double(CFG_VIDEO_CARRIER, cfg.video_carrier_hz);
+    push_double(CFG_OFFSET_HZ, cfg.offset_hz);
+    push_int(CFG_LNA_GAIN, cfg.lna_gain);
+    push_int(CFG_VGA_GAIN, cfg.vga_gain);
+    push_bool(CFG_AMP, cfg.amp);
+    push_bool(CFG_GAIN_AUTO, cfg.gain_auto);
+    push_int(CFG_FRAME_WIDTH, cfg.frame_width);
+    push_int(CFG_FRAME_HEIGHT, cfg.frame_height);
+    push_bool(CFG_AUTO_DETECT, cfg.auto_detect);
+    push_bool(CFG_CLkout, cfg.clkout);
+    push_bool(CFG_ENFORCE_CLKIN, cfg.enforce_clkin);
+}
+
 namespace {
 
 void usage() {
@@ -396,7 +519,8 @@ double carrier_offset_hz(const NtscDecoder& dec, const Config& cfg) {
     return 0.5 * (f_tip + f_white);
 }
 
-void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
+void dsp_thread(ConfigChangeQueue* events,
+                const Config& cfg, ISampleSource* src, NtscDecoder* dec,
                 Recorder* rec, std::atomic<float>* mean_raw) {
     constexpr size_t kBlockBytes = 1 << 16;
     std::vector<uint8_t> raw(kBlockBytes);
@@ -404,14 +528,53 @@ void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
     std::vector<float> comp(kBlockBytes / 2);
 
     DcBlocker dcb;
-    const bool mix = cfg.offset_hz != 0.0;
-    Nco mixer(cfg.offset_hz, cfg.sample_rate);
+    double offset_hz = cfg.offset_hz;
+    Nco mixer(offset_hz, cfg.sample_rate);
     FirFilterC chan_lpf(design_lowpass(std::min(8.0e6, cfg.sample_rate * 0.49), cfg.sample_rate, 47));
-    FmDetector fm_det(cfg.sample_rate, cfg.fm_dev_hz, cfg.invert);
-    const bool use_video_lpf = cfg.video_lpf_hz > 0.0;
-    FirFilterF video_lpf(design_lowpass(use_video_lpf ? std::min(cfg.video_lpf_hz, cfg.sample_rate * 0.45) : 1.0, cfg.sample_rate, 63));
+    double fm_dev = cfg.fm_dev_hz;
+    bool invert = cfg.invert;
+    FmDetector fm_det(cfg.sample_rate, fm_dev, invert);
+    double video_lpf = cfg.video_lpf_hz;
+    bool use_video_lpf = video_lpf > 0.0;
+    FirFilterF video_lpf_filter(design_lowpass(use_video_lpf ? std::min(video_lpf, cfg.sample_rate * 0.45) : 1.0, cfg.sample_rate, 63));
 
     while (g_running.load(std::memory_order_relaxed)) {
+        // Poll for config changes before each block
+        if (events) {
+            ConfigChangeEvent evt;
+            while (events->pop(evt)) {
+                switch (evt.type) {
+                    case CFG_FM_DEV: {
+                        fm_dev = evt.val.dbl_val;
+                        fm_det = FmDetector(cfg.sample_rate, fm_dev, invert);
+                        std::printf("DSP: fm_dev=%.1f MHz\n", fm_dev / 1e6);
+                        break;
+                    }
+                    case CFG_INVERT: {
+                        invert = evt.val.bool_val;
+                        fm_det = FmDetector(cfg.sample_rate, fm_dev, invert);
+                        std::printf("DSP: invert=%s\n", invert ? "true" : "false");
+                        break;
+                    }
+                    case CFG_VIDEO_LPF: {
+                        video_lpf = evt.val.dbl_val;
+                        use_video_lpf = video_lpf > 0.0;
+                        video_lpf_filter = FirFilterF(design_lowpass(
+                            use_video_lpf ? std::min(video_lpf, cfg.sample_rate * 0.45) : 1.0,
+                            cfg.sample_rate, 63));
+                        std::printf("DSP: video_lpf=%.1f MHz\n", video_lpf / 1e6);
+                        break;
+                    }
+                    case CFG_SAMPLE_RATE: {
+                        // Sample rate change requires full restart — log warning
+                        std::printf("DSP: sample_rate change requires restart\n");
+                        break;
+                    }
+                    default: break;
+                }
+            }
+        }
+
         size_t n = src->read(raw.data(), raw.size());
         if (n == 0) break;
         rec->write(raw.data(), n);
@@ -420,10 +583,10 @@ void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
             std::complex<float> c(static_cast<int8_t>(raw[2 * i]) / 128.0f, static_cast<int8_t>(raw[2 * i + 1]) / 128.0f);
             iq[i] = dcb.process(c);
         }
-        if (mix) for (size_t i = 0; i < ns; ++i) iq[i] *= mixer.next();
+        if (offset_hz != 0.0) for (size_t i = 0; i < ns; ++i) iq[i] *= mixer.next();
         chan_lpf.process(iq.data(), iq.data(), ns);
         fm_det.process(iq.data(), comp.data(), ns);
-        if (use_video_lpf) video_lpf.process(comp.data(), comp.data(), ns);
+        if (use_video_lpf) video_lpf_filter.process(comp.data(), comp.data(), ns);
         float sum = 0.0f;
         for (size_t i = 0; i < ns; ++i) sum += comp[i];
         float m = mean_raw->load(std::memory_order_relaxed);
@@ -528,7 +691,7 @@ int main(int argc, char** argv) {
         tmp_tb.resize(cfg.frame_width, cfg.frame_height);
         NtscDecoder tmp_dec(auto_cfg, tmp_tb);
         std::atomic<float> tmp_mean_raw{0.0f};
-        std::thread tmp_dsp(dsp_thread, std::cref(auto_cfg), src.get(), &tmp_dec, &rec, &tmp_mean_raw);
+        std::thread tmp_dsp(dsp_thread, nullptr, std::cref(auto_cfg), src.get(), &tmp_dec, &rec, &tmp_mean_raw);
         
         // Wait for detection (max 10 seconds)
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -591,7 +754,12 @@ int main(int argc, char** argv) {
     
     tb.resize(cfg.frame_width, cfg.frame_height);
     dec = new NtscDecoder(auto_cfg, tb);
-    dsp = std::thread(dsp_thread, std::cref(auto_cfg), src.get(), dec, &rec, &mean_raw);
+    ConfigChangeQueue web_events_store;
+    ConfigChangeQueue* web_events = nullptr;
+#ifdef HAVE_WEBGUI
+    web_events = &web_events_store;
+#endif
+    dsp = std::thread(dsp_thread, web_events, std::cref(auto_cfg), src.get(), dec, &rec, &mean_raw);
 
     int rc = 0;
 
