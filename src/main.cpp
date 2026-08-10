@@ -2,6 +2,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
@@ -94,7 +95,12 @@ void usage() {
         "  --no-stats            hide frame/dropped/latency stats\n"
         "\nkeys (SDL mode only): q/ESC quit, a gain auto/manual, l/L LNA, g/G VGA, b RF amp,\n"
         "      c color, o OSD on/off, s screenshot, h help,\n"
-        "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ\n");
+        "      arrows tune (50 kHz / 1 MHz), r CRT mode, v record IQ\n"
+        "\nDebug mode (no GUI):\n"
+        "  --debug               run DSP pipeline without SDL/ImGui,\n"
+        "                        print periodic stats to stdout.\n"
+        "                        Ctrl+C or --debug-duration N to stop.\n"
+        "  --debug-duration N    auto-stop after N seconds (0=forever)\n");
 }
 
 bool parse_args(int argc, char** argv, Config* cfg) {
@@ -232,6 +238,11 @@ bool parse_args(int argc, char** argv, Config* cfg) {
         else if (a == "--no-agc") cfg->show_agc = false;
         else if (a == "--no-clkin") cfg->show_clkin = false;
         else if (a == "--no-stats") cfg->show_stats = false;
+        else if (a == "--debug") cfg->debug_mode = true;
+        else if (a == "--debug-duration") {
+            cfg->debug_duration_sec = std::atoi(next("--debug-duration"));
+            if (cfg->debug_duration_sec < 0) cfg->debug_duration_sec = 0;
+        }
         else if (a == "--auto-res") cfg->auto_detect = true;
         else if (a == "--resolution") {
             std::string v = next("--resolution");
@@ -556,7 +567,103 @@ int main(int argc, char** argv) {
     dsp = std::thread(dsp_thread, std::cref(auto_cfg), src.get(), dec, &rec, &mean_raw);
 
     int rc = 0;
-    if (cfg.headless) {
+
+    // Debug mode: run DSP without GUI, print periodic stats to stdout.
+    // Supports Ctrl+C (SIGINT) and --debug-duration N for finite runs.
+    if (cfg.debug_mode) {
+        // SIGINT handler: set g_running false so the DSP thread exits cleanly.
+        std::signal(SIGINT, [](int) { g_running.store(false, std::memory_order_relaxed); });
+
+        uint64_t prev_frames = 0;
+        uint64_t prev_lines = 0;
+        auto last_stat = std::chrono::steady_clock::now();
+        auto run_start = std::chrono::steady_clock::now();
+        uint64_t last_dropped = 0;
+        uint64_t last_clipped = 0;
+
+        std::printf("[DEBUG MODE] Running... Ctrl+C to stop.\n");
+        std::fflush(stdout);
+
+        while (g_running.load(std::memory_order_relaxed)) {
+            // Check duration limit
+            if (cfg.debug_duration_sec > 0) {
+                auto elapsed = std::chrono::steady_clock::now() - run_start;
+                if (std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() >= cfg.debug_duration_sec) {
+                    std::printf("\n[DEBUG MODE] Duration limit reached (%d seconds).\n", cfg.debug_duration_sec);
+                    std::fflush(stdout);
+                    break;
+                }
+            }
+
+            // Acquire frames (non-blocking)
+            const Frame* f = tb.acquire();
+            (void)f; // just to confirm frames are flowing
+
+            // Print stats periodically
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_stat >= std::chrono::seconds(1)) {
+                uint64_t frames = dec->stats().frames.load();
+                uint64_t lines = dec->stats().lines.load();
+                uint64_t dropped = src->dropped_bytes();
+                uint64_t clipped = src->clipped_samples();
+
+                // Calculate rates
+                double dt = std::chrono::duration<double>(now - last_stat).count();
+                double fps = dt > 0 ? (frames - prev_frames) / dt : 0.0;
+                double lps = dt > 0 ? (lines - prev_lines) / dt : 0.0;
+                double drop_rate = dt > 0 ? (dropped - last_dropped) / dt : 0.0;
+                double clip_rate = dt > 0 ? (clipped - last_clipped) / dt : 0.0;
+
+                bool line_locked = dec->stats().line_locked.load();
+                bool vsync_locked = (now - last_stat < std::chrono::milliseconds(500));
+
+                std::printf("[STATS] frames=%llu lines=%llu fps=%.1f lps=%.1f "
+                           "line=%s vsync=%s dropped=%.0f/s clipped=%.0f/s "
+                           "ring=%.1f%%\n",
+                           static_cast<unsigned long long>(frames),
+                           static_cast<unsigned long long>(lines),
+                           fps, lps,
+                           line_locked ? "LOCKED" : "lost",
+                           vsync_locked ? "locked" : "lost",
+                           drop_rate, clip_rate,
+                           src->ring_fill());
+                std::fflush(stdout);
+
+                prev_frames = frames;
+                prev_lines = lines;
+                last_stat = now;
+                last_dropped = dropped;
+                last_clipped = clipped;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        // Final summary
+        auto duration = std::chrono::steady_clock::now() - run_start;
+        double total_secs = std::chrono::duration<double>(duration).count();
+        uint64_t total_frames = dec->stats().frames.load();
+        uint64_t total_lines = dec->stats().lines.load();
+        uint64_t total_coasted = dec->stats().lines_coasted.load();
+
+        std::printf("\n[DEBUG SUMMARY] Duration: %.1f seconds\n", total_secs);
+        std::printf("  Frames: %llu\n", static_cast<unsigned long long>(total_frames));
+        std::printf("  Lines: %llu (coasted: %llu)\n",
+                    static_cast<unsigned long long>(total_lines),
+                    static_cast<unsigned long long>(total_coasted));
+        std::printf("  Dropped bytes: %llu\n",
+                    static_cast<unsigned long long>(src->dropped_bytes()));
+        std::printf("  Clipped samples: %llu\n",
+                    static_cast<unsigned long long>(src->clipped_samples()));
+        if (dec->stats().line_locked.load()) {
+            std::printf("  Carrier offset: %+.2f MHz\n",
+                        carrier_offset_hz(*dec, cfg) / 1e6);
+        }
+        if (total_frames == 0) {
+            std::printf("  WARNING: No frames decoded - check signal/source\n");
+        }
+        std::fflush(stdout);
+    } else if (cfg.headless) {
         uint64_t last_seq = 0;
         int written = 0;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);

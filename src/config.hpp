@@ -109,6 +109,12 @@ struct Config {
     bool show_clkin = true;           // external clock locked indicator
     bool show_stats = true;           // frames, dropped, clipping, latency
 
+    // Debug mode: run DSP pipeline without GUI, print periodic stats to stdout.
+    // Useful for diagnosing source issues (e.g. SoapySDR crashes) without the
+    // SDL/ImGui layer. Ctrl+C to exit; --debug-duration N for finite runs.
+    bool debug_mode = false;
+    int debug_duration_sec = 0;  // 0 = infinite, >0 = auto-exit after N seconds
+
     double center_hz() const { return video_carrier_hz + offset_hz; }
 };
 
