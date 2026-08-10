@@ -31,6 +31,18 @@ struct OsdStats {
     bool crt = false;
     bool recording = false;
     float rec_seconds = 0.0f;
+    // ── Config state (for Web GUI read-back) ───────────────────────────────
+    bool afc_enabled = true;
+    double fm_dev_hz = 5000000.0;
+    bool invert = false;
+    double video_lpf_hz = 0.0;
+    float saturation = 1.0f;
+    float hue_deg = 0.0f;
+    double offset_hz = 0.0;
+    double sample_rate = 10000000.0;
+    int frame_width = 640;
+    int frame_height = 480;
+    bool auto_detect = false;
 };
 
 struct CrtLut {

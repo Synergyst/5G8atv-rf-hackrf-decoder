@@ -838,6 +838,19 @@ int main(int argc, char** argv) {
                     st.channel = channel;
                     st.video_latency_ms = 0;  // no reliable latency calc in Web mode
 
+                    // Config state for Web GUI read-back
+                    st.afc_enabled = cfg.afc;
+                    st.fm_dev_hz = cfg.fm_dev_hz;
+                    st.invert = cfg.invert;
+                    st.video_lpf_hz = cfg.video_lpf_hz;
+                    st.saturation = cfg.saturation;
+                    st.hue_deg = cfg.hue_deg;
+                    st.offset_hz = cfg.offset_hz;
+                    st.sample_rate = cfg.sample_rate;
+                    st.frame_width = cfg.frame_width;
+                    st.frame_height = cfg.frame_height;
+                    st.auto_detect = cfg.auto_detect;
+
                     // AFC
                     {
                         bool locked = st.line_locked && st.vsync_locked;
