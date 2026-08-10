@@ -561,8 +561,14 @@ int main(int argc, char** argv) {
                    target_width, target_height);
         std::fflush(stdout);
     }
+
+    // Copy auto-detected resolution into cfg so the GUI path's
+    // tb.resize(cfg.frame_width, ...) below uses the correct dimensions.
+    cfg.frame_width = auto_cfg.frame_width;
+    cfg.frame_height = auto_cfg.frame_height;
+    cfg.auto_res_applied = true;
     
-    tb.resize(auto_cfg.frame_width, auto_cfg.frame_height);
+    tb.resize(cfg.frame_width, cfg.frame_height);
     dec = new NtscDecoder(auto_cfg, tb);
     dsp = std::thread(dsp_thread, std::cref(auto_cfg), src.get(), dec, &rec, &mean_raw);
 

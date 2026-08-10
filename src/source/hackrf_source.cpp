@@ -89,6 +89,16 @@ void HackRfSource::stop() {
     }
 }
 
+void HackRfSource::pause() {
+    // Set running_ = false so read() returns immediately, unblocking the
+    // DSP thread which is blocked inside read() during auto-res detection.
+    running_.store(false, std::memory_order_relaxed);
+}
+
+void HackRfSource::resume() {
+    running_.store(true, std::memory_order_relaxed);
+}
+
 size_t HackRfSource::read(uint8_t* buf, size_t len) {
     size_t got = 0;
     while (got < len && running_.load(std::memory_order_relaxed)) {
