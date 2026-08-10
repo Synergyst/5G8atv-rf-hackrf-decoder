@@ -85,8 +85,14 @@ struct Config {
     bool auto_detect = false;  // enable --auto-res mode
     bool auto_res_applied = false;  // mark when auto-resolution has been applied
 
+#ifdef HAVE_WEBGUI
+    enum class GuiMode { ImGui, Sdl, Web };
+    GuiMode gui_mode = GuiMode::ImGui;
+    int web_port = 8080;
+#else
     enum class GuiMode { ImGui, Sdl };
     GuiMode gui_mode = GuiMode::ImGui;
+#endif
 
     // CLKIN / CLKOUT (GPSDO support)
     bool clkout = true;    // enable 10 MHz clock output (default: on)

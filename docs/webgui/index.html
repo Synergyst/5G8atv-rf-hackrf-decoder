@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fpvdec - FPV ATV Decoder</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+    }
+    #video-container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+    #video {
+      max-width: 100%;
+      max-height: 100%;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+    #loading {
+      position: absolute;
+      color: #888;
+      font-size: 1.2em;
+    }
+    #controls {
+      width: 300px;
+      background: #16213e;
+      border-left: 1px solid #0f3460;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    #controls h2 {
+      color: #e94560;
+      font-size: 1.1em;
+      margin-bottom: 4px;
+    }
+    .section {
+      background: #1a1a2e;
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .section h3 {
+      color: #0f9bef;
+      font-size: 0.9em;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .stat {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px solid #2a2a4a;
+      font-size: 0.85em;
+    }
+    .stat:last-child { border-bottom: none; }
+    .stat-label { color: #888; }
+    .stat-value { color: #e0e0e0; font-weight: 600; }
+    .stat-value.locked { color: #4ade80; }
+    .stat-value.unlocked { color: #ef4444; }
+    .stat-value.warn { color: #f59e0b; }
+    .btn {
+      background: #0f3460;
+      color: #e0e0e0;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85em;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #e94560; }
+    .btn-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+    select, input[type="range"] {
+      width: 100%;
+      background: #2a2a4a;
+      color: #e0e0e0;
+      border: 1px solid #3a3a5a;
+      padding: 6px;
+      border-radius: 4px;
+    }
+    input[type="range"] {
+      -webkit-appearance: none;
+      height: 6px;
+      border-radius: 3px;
+      background: #2a2a4a;
+      padding: 0;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #e94560;
+      cursor: pointer;
+    }
+    #fps-counter {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: #4ade80;
+      font-family: monospace;
+      font-size: 1em;
+      background: rgba(0,0,0,0.6);
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+    .channel-btn {
+      background: #2a2a4a;
+      color: #e0e0e0;
+      border: 1px solid #3a3a5a;
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.8em;
+    }
+    .channel-btn:hover, .channel-btn.active {
+      background: #e94560;
+      border-color: #e94560;
+    }
+    .channel-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 4px;
+    }
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 4px 0;
+    }
+    .slider-row label {
+      min-width: 60px;
+      font-size: 0.8em;
+      color: #888;
+    }
+    .slider-row input[type="range"] { flex: 1; }
+    .slider-row .val {
+      min-width: 30px;
+      text-align: right;
+      font-size: 0.8em;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+  <div id="video-container">
+    <img id="video" alt="FPV Video">
+    <div id="loading">Connecting to fpvdec...</div>
+    <div id="fps-counter">0 FPS</div>
+  </div>
+  <div id="controls">
+    <h2>fpvdec Web UI</h2>
+    
+    <!-- Decoder Stats -->
+    <div class="section">
+      <h3>Decoder Status</h3>
+      <div id="stats">
+        <div class="stat"><span class="stat-label">Line Sync</span><span class="stat-value" id="line-sync">--</span></div>
+        <div class="stat"><span class="stat-label">V-Sync</span><span class="stat-value" id="vsync">--</span></div>
+        <div class="stat"><span class="stat-label">FPS</span><span class="stat-value" id="fps-stat">0</span></div>
+        <div class="stat"><span class="stat-label">Frame Count</span><span class="stat-value" id="frames">0</span></div>
+        <div class="stat"><span class="stat-label">Lines</span><span class="stat-value" id="lines">0</span></div>
+        <div class="stat"><span class="stat-label">Channel</span><span class="stat-value" id="channel">---</span></div>
+        <div class="stat"><span class="stat-label">Frequency</span><span class="stat-value" id="freq">--- MHz</span></div>
+        <div class="stat"><span class="stat-label">Clipping</span><span class="stat-value" id="clipping">NO</span></div>
+        <div class="stat"><span class="stat-label">Latency</span><span class="stat-value" id="latency">0 ms</span></div>
+      </div>
+    </div>
+    
+    <!-- AGC Info -->
+    <div class="section">
+      <h3>AGC / Gain</h3>
+      <div class="stat"><span class="stat-label">Mode</span><span class="stat-value" id="gain-mode">AUTO</span></div>
+      <div class="stat"><span class="stat-label">LNA</span><span class="stat-value" id="lna">--</span></div>
+      <div class="stat"><span class="stat-label">VGA</span><span class="stat-value" id="vga">--</span></div>
+      <div class="stat"><span class="stat-label">RF Amp</span><span class="stat-value" id="amp">ON</span></div>
+    </div>
+    
+    <!-- Channel Selection -->
+    <div class="section">
+      <h3>Channel</h3>
+      <select id="band-select">
+        <option value="A">Boscam A</option>
+        <option value="B">Boscam B</option>
+        <option value="E">E</option>
+        <option value="F">Airwave F</option>
+        <option value="R">Raceband R</option>
+      </select>
+      <div class="channel-grid" id="channel-grid" style="margin-top:8px;"></div>
+    </div>
+    
+    <!-- Controls -->
+    <div class="section">
+      <h3>Controls</h3>
+      <div class="btn-group">
+        <button class="btn" id="btn-gain-toggle">Toggle Gain</button>
+        <button class="btn" id="btn-amp">Toggle Amp</button>
+        <button class="btn" id="btn-lna-up">LNA +</button>
+        <button class="btn" id="btn-lna-down">LNA -</button>
+        <button class="btn" id="btn-vga-up">VGA +</button>
+        <button class="btn" id="btn-vga-down">VGA -</button>
+      </div>
+    </div>
+    
+    <!-- Frequency Tuning -->
+    <div class="section">
+      <h3>Frequency</h3>
+      <div class="slider-row">
+        <label>Offset</label>
+        <input type="range" id="freq-offset" min="-1000000" max="1000000" step="50000" value="0">
+        <span class="val" id="freq-offset-val">0</span>
+      </div>
+    </div>
+    
+    <!-- Screenshot -->
+    <div class="section">
+      <h3>Export</h3>
+      <button class="btn" id="btn-screenshot" style="width:100%;">Download Screenshot</button>
+    </div>
+  </div>
+
+  <script>
+    const BASE = window.location.origin;
+    const video = document.getElementById('video');
+    const loading = document.getElementById('loading');
+    const fpsCounter = document.getElementById('fps-counter');
+    
+    let lastFrameSeq = 0;
+    let fpsFrames = 0;
+    let fpsTime = Date.now();
+    
+    // Channel frequencies (MHz)
+    const CHANNELS = {
+      A: [5865,5845,5825,5805,5785,5765,5745,5725],
+      B: [5733,5752,5771,5790,5809,5828,5847,5866],
+      E: [5705,5685,5665,5645,5885,5905,5925,5945],
+      F: [5740,5760,5780,5800,5820,5840,5860,5880],
+      R: [5658,5695,5732,5769,5806,5843,5880,5917]
+    };
+    let selectedBand = 'A';
+    let selectedChannel = 0;
+    
+    // Build channel grid
+    function buildChannelGrid() {
+      const grid = document.getElementById('channel-grid');
+      grid.innerHTML = '';
+      CHANNELS[selectedBand].forEach((freq, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'channel-btn' + (selectedChannel === i ? ' active' : '');
+        btn.textContent = (i+1);
+        btn.onclick = () => selectChannel(selectedBand, i);
+        grid.appendChild(btn);
+      });
+    }
+    
+    function selectChannel(band, idx) {
+      selectedBand = band;
+      selectedChannel = idx;
+      document.getElementById('band-select').value = band;
+      buildChannelGrid();
+      sendConfig('channel', `${band}${idx+1}`);
+    }
+    
+    document.getElementById('band-select').onchange = (e) => {
+      selectedBand = e.target.value;
+      selectedChannel = 0;
+      buildChannelGrid();
+    };
+    
+    function sendConfig(key, value) {
+      fetch(`${BASE}/api/set`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: `${key}=${encodeURIComponent(value)}`
+      }).catch(err => console.error('Config error:', err));
+    }
+    
+    // Fetch stats periodically
+    async function updateStats() {
+      try {
+        const res = await fetch(`${BASE}/api/stats`);
+        if (res.ok) {
+          const stats = await res.json();
+          document.getElementById('line-sync').textContent = stats.line_locked ? 'LOCKED' : 'LOST';
+          document.getElementById('line-sync').className = 'stat-value ' + (stats.line_locked ? 'locked' : 'unlocked');
+          document.getElementById('vsync').textContent = stats.vsync_locked ? 'LOCKED' : 'LOST';
+          document.getElementById('vsync').className = 'stat-value ' + (stats.vsync_locked ? 'locked' : 'unlocked');
+          document.getElementById('fps-stat').textContent = stats.fps ? stats.fps.toFixed(1) : '0';
+          document.getElementById('frames').textContent = stats.frames || 0;
+          document.getElementById('lines').textContent = stats.lines || 0;
+          document.getElementById('channel').textContent = stats.channel || '---';
+          document.getElementById('freq').textContent = stats.freq_mhz ? stats.freq_mhz.toFixed(2) + ' MHz' : '--- MHz';
+          document.getElementById('clipping').textContent = stats.clipping ? 'YES' : 'NO';
+          document.getElementById('clipping').className = 'stat-value ' + (stats.clipping ? 'unlocked' : 'locked');
+          document.getElementById('latency').textContent = stats.video_latency_ms ? stats.video_latency_ms.toFixed(0) + ' ms' : '0 ms';
+          document.getElementById('gain-mode').textContent = stats.gain_auto ? 'AUTO' : 'MANUAL';
+          document.getElementById('lna').textContent = stats.lna;
+          document.getElementById('vga').textContent = stats.vga;
+          document.getElementById('amp').textContent = stats.amp ? 'ON' : 'OFF';
+          document.getElementById('amp').className = 'stat-value ' + (stats.amp ? 'locked' : 'warn');
+        }
+      } catch (e) { /* ignore */ }
+    }
+    
+    // Fetch frame as JPEG
+    async function updateFrame() {
+      try {
+        const res = await fetch(`${BASE}/api/frame?t=${Date.now()}`);
+        if (!res.ok || !res.body) return;
+        
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        video.onload = () => URL.revokeObjectURL(url);
+        video.src = url;
+        loading.style.display = 'none';
+        
+        // FPS counter
+        fpsFrames++;
+        const now = Date.now();
+        if (now - fpsTime >= 1000) {
+          const fps = Math.round(fpsFrames * 1000 / (now - fpsTime));
+          fpsCounter.textContent = fps + ' FPS';
+          fpsFrames = 0;
+          fpsTime = now;
+        }
+      } catch (e) { /* ignore */ }
+    }
+    
+    // Controls
+    document.getElementById('btn-gain-toggle').onclick = () => sendConfig('gain', document.getElementById('gain-mode').textContent.toLowerCase());
+    document.getElementById('btn-amp').onclick = () => sendConfig('amp', !document.getElementById('amp').textContent.startsWith('O') ? 'on' : 'off');
+    document.getElementById('btn-lna-up').onclick = () => sendConfig('lna', parseInt(document.getElementById('lna').textContent || 0) + 8);
+    document.getElementById('btn-lna-down').onclick = () => sendConfig('lna', Math.max(0, parseInt(document.getElementById('lna').textContent || 0) - 8));
+    document.getElementById('btn-vga-up').onclick = () => sendConfig('vga', parseInt(document.getElementById('vga').textContent || 0) + 2);
+    document.getElementById('btn-vga-down').onclick = () => sendConfig('vga', Math.max(0, parseInt(document.getElementById('vga').textContent || 0) - 2));
+    
+    document.getElementById('freq-offset').oninput = (e) => {
+      document.getElementById('freq-offset-val').textContent = e.target.value;
+      sendConfig('offset', e.target.value);
+    };
+    
+    document.getElementById('btn-screenshot').onclick = () => {
+      const a = document.createElement('a');
+      a.href = video.src;
+      a.download = `fpvdec_${Date.now()}.jpg`;
+      a.click();
+    };
+    
+    // Initialize
+    buildChannelGrid();
+    
+    // Polling loop
+    let lastStatsTime = 0;
+    function poll() {
+      updateFrame();
+      const now = Date.now();
+      if (now - lastStatsTime > 200) {
+        updateStats();
+        lastStatsTime = now;
+      }
+      requestAnimationFrame(poll);
+    }
+    poll();
+  </script>
+</body>
+</html>

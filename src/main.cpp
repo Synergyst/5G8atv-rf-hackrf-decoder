@@ -32,6 +32,9 @@
 #endif
 #include "ui/sdl_display.hpp"
 #include "ui/gui_manager.hpp"
+#ifdef HAVE_WEBGUI
+#include "ui/web_display.hpp"
+#endif
 #include "util/fpv_channels.hpp"
 #include "util/spectrum.hpp"
 
@@ -73,7 +76,12 @@ void usage() {
         "  --dump-frames PREFIX  write decoded frames as PPM (headless)\n"
         "  --frames N            number of frames for --dump-frames (default 30)\n"
         "  --spectrum            print PSD and exit (no video)\n"
+#ifdef HAVE_WEBGUI
+        "  --gui imgui|sdl|web   GUI mode: imgui (default), sdl, or web (headless server)\n"
+        "  --web-port N          web server port (default: 8080)\n"
+#else
         "  --gui imgui|sdl       GUI mode: imgui (default, no hotkeys) or sdl (hotkeys)\n"
+#endif
         "  --resolution WxH      output resolution (default 640x480)\n"
         "  --aspect 4:3|16:9|16:10|5:4|custom  aspect ratio preset\n"
 #ifdef HAVE_SOAPYSDR
@@ -197,7 +205,20 @@ bool parse_args(int argc, char** argv, Config* cfg) {
             std::string v = next("--gui");
             if (v == "imgui") cfg->gui_mode = Config::GuiMode::ImGui;
             else if (v == "sdl") cfg->gui_mode = Config::GuiMode::Sdl;
+#ifdef HAVE_WEBGUI
+            else if (v == "web") cfg->gui_mode = Config::GuiMode::Web;
+            else { std::fprintf(stderr, "gui mode must be imgui|sdl|web\n"); return false; }
+#else
             else { std::fprintf(stderr, "gui mode must be imgui|sdl\n"); return false; }
+#endif
+        } else if (a == "--web-port") {
+#ifdef HAVE_WEBGUI
+            cfg->web_port = std::atoi(next("--web-port"));
+            if (cfg->web_port <= 0) cfg->web_port = 8080;
+#else
+            next("--web-port");  // consume argument, warn
+            std::fprintf(stderr, "warning: --web-port ignored (Web GUI not compiled in)\n");
+#endif
         } else if (a == "--enforce-clkin") cfg->enforce_clkin = true;
         else if (a == "--no-clkout") cfg->clkout = false;
         else if (a == "--overlay-font") cfg->overlay_font_size = std::atoi(next("--overlay-font"));
@@ -695,6 +716,183 @@ int main(int argc, char** argv) {
                         carrier_offset_hz(*dec, cfg) / 1e6);
         if (written == 0) rc = 1;
     } else {
+#ifdef HAVE_WEBGUI
+        if (cfg.gui_mode == Config::GuiMode::Web) {
+            // Web GUI mode — headless server with browser display
+            WebDisplay web_disp;
+            if (!web_disp.init(cfg.web_port)) {
+                std::fprintf(stderr, "Web GUI init failed\n");
+                g_running.store(false);
+                dsp.join();
+                return 1;
+            }
+
+            // Build the filter pipeline
+            FilterPipeline pipeline;
+            if (cfg.denoise > 0.0f) {
+                auto* denoise = new Denoiser();
+                denoise->set_strength(cfg.denoise);
+                pipeline.add(denoise);
+            }
+            if (cfg.denoise_temporal > 0.0f) {
+                auto* temporal = new TemporalFilter();
+                temporal->set_alpha(cfg.denoise_temporal);
+                pipeline.add(temporal);
+            }
+            if (cfg.denoise_temporal_median > 0) {
+                auto* tmed = new TemporalMedian();
+                tmed->set_frames(cfg.denoise_temporal_median);
+                tmed->set_strength(cfg.denoise_temporal_median_strength);
+                pipeline.add(tmed);
+            }
+            pipeline.init(cfg.frame_width, cfg.frame_height);
+
+            std::string channel = fpv_nearest_channel(cfg.video_carrier_hz);
+            uint64_t prev_frames = 0;
+            auto last_frame_inc = std::chrono::steady_clock::now();
+            auto last_afc = last_frame_inc;
+            auto lock_changed = last_frame_inc;
+            bool was_locked = false;
+            std::vector<double> afc_meas;
+            auto last_agc = last_frame_inc;
+            auto last_clip_seen = last_frame_inc - std::chrono::seconds(10);
+            uint64_t last_clip_count = 0;
+
+            while (g_running.load(std::memory_order_relaxed)) {
+                // Acquire frame
+                const Frame* f = tb.acquire();
+                if (f) {
+                    if (cfg.auto_detect && !cfg.auto_res_applied &&
+                        dec->stats().auto_detect_ready.load(std::memory_order_acquire)) {
+                        // Auto-res detection — same as SDL mode
+                        double chroma_hz = dec->stats().detected_chroma_hz.load(std::memory_order_acquire);
+                        int active_lines = dec->stats().detected_active_lines.load(std::memory_order_acquire);
+                        int horiz_detail = dec->stats().detected_horiz_detail.load(std::memory_order_acquire);
+                        int line_rate_mhz = dec->stats().detected_line_rate.load(std::memory_order_acquire);
+                        bool is_pal = (chroma_hz > 4.0e6);
+                        if (active_lines <= 0) active_lines = is_pal ? 288 : 240;
+                        int target_width = cfg.frame_width;
+                        int target_height = cfg.frame_height;
+                        if (cfg.aspect_ratio == Config::AspectRatio::R16_9)
+                            target_width = static_cast<int>(target_height * 16.0 / 9.0 + 0.5);
+                        else if (cfg.aspect_ratio == Config::AspectRatio::R16_10)
+                            target_width = static_cast<int>(target_height * 16.0 / 10.0 + 0.5);
+                        else if (cfg.aspect_ratio == Config::AspectRatio::R5_4)
+                            target_width = static_cast<int>(target_height * 5.0 / 4.0 + 0.5);
+                        else if (cfg.aspect_ratio == Config::AspectRatio::R4_3)
+                            target_width = static_cast<int>(target_height * 4.0 / 3.0 + 0.5);
+                        cfg.frame_width = target_width;
+                        cfg.frame_height = target_height;
+                        cfg.auto_res_applied = true;
+                        tb.resize(cfg.frame_width, cfg.frame_height);
+                        pipeline.init(cfg.frame_width, cfg.frame_height);
+                        std::printf("AUTO-RES: detected %s (chroma=%.2f MHz, %d active lines, "
+                                   "horiz_detail=%d, line_rate=%.3f kHz)\n  -> %dx%d\n",
+                                   is_pal ? "PAL" : "NTSC", chroma_hz / 1e6, active_lines,
+                                   horiz_detail, line_rate_mhz / 1000.0,
+                                   cfg.frame_width, cfg.frame_height);
+                        std::fflush(stdout);
+                    }
+
+                    // Build stats
+                    OsdStats st;
+                    st.line_locked = dec->stats().line_locked.load();
+                    st.burst_amp = dec->stats().burst_amp.load();
+                    st.ring_fill = src->ring_fill();
+                    st.dropped = src->dropped_bytes();
+                    st.clipped = src->clipped_samples();
+                    st.frames = dec->stats().frames.load();
+                    st.lines = dec->stats().lines.load();
+                    if (hackrf) { st.lna = hackrf->lna(); st.vga = hackrf->vga(); }
+                    st.amp = cfg.amp;
+                    st.gain_auto = cfg.gain_auto;
+                    st.clkin_locked = hackrf ? hackrf->check_clkin() : false;
+
+                    auto now = std::chrono::steady_clock::now();
+                    if (st.clipped > last_clip_count) { last_clip_count = st.clipped; last_clip_seen = now; }
+                    st.clipping = (now - last_clip_seen) < std::chrono::seconds(1);
+                    if (cfg.gain_auto && hackrf && now - last_agc >= std::chrono::milliseconds(500)) {
+                        last_agc = now;
+                        int peak = hackrf->take_peak();
+                        int lna = hackrf->lna(), vga = hackrf->vga();
+                        if (peak >= 124) {
+                            int down = peak >= 127 ? 12 : 6;
+                            if (vga > 0) hackrf->set_gains(lna, vga - down);
+                            else if (lna > 0) hackrf->set_gains(lna - 8, vga);
+                        } else if (peak > 0 && peak < 64) {
+                            if (vga < 62) hackrf->set_gains(lna, vga + 2);
+                            else if (lna < 40) hackrf->set_gains(lna + 8, vga);
+                        }
+                        if (hackrf->lna() != lna || hackrf->vga() != vga)
+                            std::printf("AGC: peak %d -> LNA%d VGA%d\n", peak, hackrf->lna(), hackrf->vga());
+                    }
+                    if (st.frames > prev_frames) { prev_frames = st.frames; last_frame_inc = now; }
+                    st.vsync_locked = (now - last_frame_inc) < std::chrono::milliseconds(500);
+                    st.channel = channel;
+
+                    // AFC
+                    {
+                        bool locked = st.line_locked && st.vsync_locked;
+                        if (locked != was_locked) { was_locked = locked; lock_changed = now; afc_meas.clear(); }
+                        if (cfg.afc && hackrf && now - last_afc >= std::chrono::milliseconds(500) &&
+                            now - lock_changed >= std::chrono::seconds(2)) {
+                            last_afc = now;
+                            afc_meas.push_back(locked ? carrier_offset_hz(*dec, cfg) :
+                                (cfg.invert ? 1.0 : -1.0) * static_cast<double>(mean_raw.load()) * cfg.fm_dev_hz);
+                            if (afc_meas.size() >= 3) {
+                                std::sort(afc_meas.begin(), afc_meas.end());
+                                double med = afc_meas[1], spread = afc_meas[2] - afc_meas[0];
+                                bool same_sign = (afc_meas[0] > 0.0) == (afc_meas[2] > 0.0);
+                                double thresh = locked ? 150e3 : 300e3;
+                                double clampv = locked ? 1e6 : 2e6;
+                                double max_spread = locked ? 200e3 : 600e3;
+                                afc_meas.clear();
+                                if (std::abs(med) > thresh && same_sign && spread < max_spread) {
+                                    double step = std::clamp(med, -clampv, clampv);
+                                    cfg.video_carrier_hz += step;
+                                    hackrf->set_center_freq(cfg.center_hz());
+                                    dec->shift_levels(static_cast<float>((cfg.invert ? -step : step) / cfg.fm_dev_hz));
+                                    channel = fpv_nearest_channel(cfg.video_carrier_hz);
+                                    std::printf("AFC%s: %+0.2f MHz -> %.2f MHz\n", locked ? "" : " (coarse)", step / 1e6, cfg.video_carrier_hz / 1e6);
+                                    std::fflush(stdout);
+                                }
+                            }
+                        }
+                    }
+
+                    // Update WebDisplay
+                    web_disp.update_frame(f);
+                    web_disp.update_stats(st);
+
+                    // Apply filter pipeline to frame for Web display
+                    Frame filtered;
+                    filtered.rgba = f->rgba;
+                    filtered.width = f->width;
+                    filtered.height = f->height;
+                    if (!pipeline.empty()) {
+                        pipeline.process(filtered);
+                        web_disp.update_frame(&filtered);
+                    }
+                }
+
+                // Check quit
+                if (web_disp.is_running()) {
+                    // Server running
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            }
+
+            g_running.store(false);
+            web_disp.request_quit();
+            // Join is handled in WebDisplay destructor
+            std::string rec_path; uint64_t rec_bytes = 0;
+            if (rec.stop(&rec_path, &rec_bytes))
+                std::printf("saved %s (%.1f MB) - replay: fpvdec --input file --file %s\n", rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());
+            return rc;
+        }
+        // else: fall through to SDL/ImGui
+#endif  // HAVE_WEBGUI
+
         bool use_imgui = (cfg.gui_mode == Config::GuiMode::ImGui);
         SdlDisplay disp;
         if (!disp.init("fpvdec - FPV ATV decoder", cfg.frame_width, cfg.frame_height)) {

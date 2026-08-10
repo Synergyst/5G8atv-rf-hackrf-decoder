@@ -26,24 +26,14 @@ public:
     WebDisplay();
     ~WebDisplay();
 
-    // Initialize the web display server. Returns true on success.
-    // port: HTTP server port (default 8080)
     bool init(int port = 8080, const std::string& title = "fpvdec");
-
-    // Request a quit from the web UI (browser close or quit button)
     void request_quit();
-
-    // Set the frame rate limit for the server thread
     void set_target_fps(int fps);
 
-    // Get the current server state
     bool is_running() const { return running_.load(); }
     int port() const { return port_; }
-
-    // Get the server URL for logging
     std::string get_url() const;
 
-    // Called from main loop to update the latest frame and stats.
     void update_frame(const Frame* frame);
     void update_stats(const OsdStats& stats);
 
@@ -55,6 +45,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> quit_requested_{false};
     int target_fps_ = 30;
+    int jpeg_quality_ = 75;
 
     std::mutex frame_mutex_;
     std::unique_ptr<Frame> current_frame_;
