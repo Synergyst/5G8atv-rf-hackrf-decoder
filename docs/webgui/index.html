@@ -357,11 +357,20 @@
       sendConfig('offset', e.target.value);
     };
     
-    document.getElementById('btn-screenshot').onclick = () => {
-      const a = document.createElement('a');
-      a.href = video.src;
-      a.download = `fpvdec_${Date.now()}.jpg`;
-      a.click();
+    document.getElementById('btn-screenshot').onclick = async () => {
+      try {
+        const res = await fetch(`${BASE}/api/frame?t=${Date.now()}`);
+        if (!res.ok) { console.error('Screenshot failed'); return; }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `fpvdec_${Date.now()}.jpg`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (e) { console.error('Screenshot error:', e); }
     };
     
     // Initialize

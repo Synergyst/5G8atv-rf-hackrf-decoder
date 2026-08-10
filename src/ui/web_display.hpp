@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -10,7 +11,8 @@
 
 #include "../config.hpp"
 #include "../dsp/frame.hpp"
-#include "sdl_display.hpp"  // For OsdStats
+#include "../source/sample_source.hpp"  // ISampleSource
+#include "sdl_display.hpp"              // OsdStats
 
 namespace famidec {
 
@@ -37,8 +39,18 @@ public:
     void update_frame(const Frame* frame);
     void update_stats(const OsdStats& stats);
 
+    // Wire in a pointer to the live Config and the ISampleSource
+    // so apply_config() can write hardware state on /api/set calls.
+    void set_source_and_config(Config* cfg, ISampleSource* src) {
+        cfg_ = cfg;
+        source_ = src;
+    }
+
 private:
     void server_thread_func();
+
+    // Apply a config change from the /api/set POST endpoint.
+    // Writes directly into cfg_ and calls source_ hardware methods.
     void apply_config(const std::string& key, const std::string& value);
 
     int port_;
@@ -53,6 +65,10 @@ private:
     std::chrono::steady_clock::time_point last_stats_update_;
 
     std::thread server_thread_;
+
+    // Wired in by set_source_and_config().
+    Config* cfg_ = nullptr;
+    ISampleSource* source_ = nullptr;
 };
 
 } // namespace famidec

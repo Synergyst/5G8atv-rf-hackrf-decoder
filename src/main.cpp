@@ -726,6 +726,8 @@ int main(int argc, char** argv) {
                 dsp.join();
                 return 1;
             }
+            // Wire in config + source so /api/set can control hardware.
+            web_disp.set_source_and_config(&cfg, src.get());
 
             // Build the filter pipeline
             FilterPipeline pipeline;
@@ -826,9 +828,15 @@ int main(int argc, char** argv) {
                         if (hackrf->lna() != lna || hackrf->vga() != vga)
                             std::printf("AGC: peak %d -> LNA%d VGA%d\n", peak, hackrf->lna(), hackrf->vga());
                     }
-                    if (st.frames > prev_frames) { prev_frames = st.frames; last_frame_inc = now; }
-                    st.vsync_locked = (now - last_frame_inc) < std::chrono::milliseconds(500);
+                    // FPS: measure from actual frame delivery rate
+                    auto now2 = std::chrono::steady_clock::now();
+                    double fps_delta = std::chrono::duration<double>(now2 - last_frame_inc).count();
+                    st.fps = (fps_delta > 0) ? static_cast<float>(1.0 / fps_delta) : 0.0f;
+                    if (st.frames > prev_frames) { prev_frames = st.frames; last_frame_inc = now2; }
+                    st.vsync_locked = (now2 - last_frame_inc) < std::chrono::milliseconds(500);
+                    st.freq_mhz = cfg.video_carrier_hz / 1e6;
                     st.channel = channel;
+                    st.video_latency_ms = 0;  // no reliable latency calc in Web mode
 
                     // AFC
                     {
@@ -864,12 +872,15 @@ int main(int argc, char** argv) {
                     web_disp.update_frame(f);
                     web_disp.update_stats(st);
 
-                    // Apply filter pipeline to frame for Web display
-                    Frame filtered;
-                    filtered.rgba = f->rgba;
-                    filtered.width = f->width;
-                    filtered.height = f->height;
-                    if (!pipeline.empty()) {
+                    // Apply filter pipeline to frame for Web display.
+                    // Push filtered frame; if no filters, use the raw frame.
+                    if (pipeline.empty()) {
+                        web_disp.update_frame(f);
+                    } else {
+                        Frame filtered;
+                        filtered.rgba = f->rgba;
+                        filtered.width = f->width;
+                        filtered.height = f->height;
                         pipeline.process(filtered);
                         web_disp.update_frame(&filtered);
                     }
