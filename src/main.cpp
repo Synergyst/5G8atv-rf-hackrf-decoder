@@ -896,6 +896,8 @@ int main(int argc, char** argv) {
             }
             // Wire in config + source so /api/set can control hardware.
             web_disp.set_source_and_config(&cfg, src.get());
+            web_disp.set_config_queue(&web_events_store);
+            web_disp.set_config_queue(&web_events_store);
 
             // Build the filter pipeline
             FilterPipeline pipeline;

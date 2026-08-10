@@ -688,6 +688,9 @@ void WebDisplay::apply_config(const std::string& key, const std::string& value) 
         std::fprintf(stderr, "WebGUI: no config wired in\n");
         return;
     }
+    // Push config change event to DSP thread queue if available.
+    // This allows dynamic settings (fm_dev, video_lpf, invert) to take effect
+    // without restarting the DSP chain.
     auto set_str = [&](const char* field, const std::string& v) {
         // Write directly into cfg_ for fields that the main loop
         // already polls.

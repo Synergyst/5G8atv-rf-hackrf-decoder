@@ -16,6 +16,9 @@
 
 namespace famidec {
 
+// Forward declaration — defined in main.cpp
+class ConfigChangeQueue;
+
 // Web display server — headless browser-based control panel.
 // Provides an HTTP server that serves a browser UI with real-time
 // video frames and decoder stats. Uses cpp-httplib for the HTTP layer.
@@ -46,6 +49,12 @@ public:
         source_ = src;
     }
 
+    // Wire in the ConfigChangeQueue so apply_config() can push events
+    // to the DSP thread for dynamic DSP parameter changes.
+    void set_config_queue(ConfigChangeQueue* queue) {
+        config_queue_ = queue;
+    }
+
 private:
     void server_thread_func();
 
@@ -69,6 +78,9 @@ private:
     // Wired in by set_source_and_config().
     Config* cfg_ = nullptr;
     ISampleSource* source_ = nullptr;
+
+    // Wired in by set_config_queue().
+    ConfigChangeQueue* config_queue_ = nullptr;
 };
 
 } // namespace famidec
