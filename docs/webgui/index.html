@@ -33,31 +33,70 @@
       font-size: 1.2em;
     }
     #controls {
-      width: 300px;
+      width: 340px;
       background: #16213e;
       border-left: 1px solid #0f3460;
       overflow-y: auto;
-      padding: 16px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
     }
-    #controls h2 {
+    #controls-header {
+      padding: 12px 16px;
+      background: #0f3460;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    #controls-header h2 {
       color: #e94560;
       font-size: 1.1em;
-      margin-bottom: 4px;
+    }
+    #controls-body {
+      padding: 8px;
+      flex: 1;
+      overflow-y: auto;
     }
     .section {
       background: #1a1a2e;
       border-radius: 8px;
-      padding: 12px;
-    }
-    .section h3 {
-      color: #0f9bef;
-      font-size: 0.9em;
       margin-bottom: 8px;
+      overflow: hidden;
+    }
+    .section-header {
+      padding: 10px 12px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      user-select: none;
+      transition: background 0.15s;
+    }
+    .section-header:hover {
+      background: #2a2a4a;
+    }
+    .section-header h3 {
+      color: #0f9bef;
+      font-size: 0.85em;
       text-transform: uppercase;
       letter-spacing: 1px;
+      margin: 0;
+    }
+    .section-arrow {
+      color: #888;
+      font-size: 0.75em;
+      transition: transform 0.2s;
+    }
+    .section.collapsed .section-arrow {
+      transform: rotate(-90deg);
+    }
+    .section-body {
+      padding: 0 12px 10px;
+      transition: max-height 0.3s ease;
+      overflow: hidden;
+    }
+    .section.collapsed .section-body {
+      max-height: 0 !important;
+      padding: 0 12px;
     }
     .stat {
       display: flex;
@@ -68,25 +107,28 @@
     }
     .stat:last-child { border-bottom: none; }
     .stat-label { color: #888; }
-    .stat-value { color: #e0e0e0; font-weight: 600; }
+    .stat-value { color: #e0e0e0; font-weight: 600; font-family: 'Consolas', monospace; }
     .stat-value.locked { color: #4ade80; }
     .stat-value.unlocked { color: #ef4444; }
     .stat-value.warn { color: #f59e0b; }
     .btn {
       background: #0f3460;
       color: #e0e0e0;
-      border: none;
+      border: 1px solid #3a3a5a;
       padding: 8px 12px;
       border-radius: 6px;
       cursor: pointer;
-      font-size: 0.85em;
-      transition: background 0.2s;
+      font-size: 0.8em;
+      transition: all 0.15s;
     }
-    .btn:hover { background: #e94560; }
+    .btn:hover { background: #1a4a80; border-color: #0f9bef; }
+    .btn:active { background: #e94560; }
+    .btn.active { background: #e94560; border-color: #e94560; }
     .btn-group {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 6px;
+      margin-top: 6px;
     }
     select, input[type="range"] {
       width: 100%;
@@ -102,6 +144,7 @@
       border-radius: 3px;
       background: #2a2a4a;
       padding: 0;
+      cursor: pointer;
     }
     input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none;
@@ -110,6 +153,7 @@
       border-radius: 50%;
       background: #e94560;
       cursor: pointer;
+      border: 2px solid #fff;
     }
     #fps-counter {
       position: absolute;
@@ -139,25 +183,87 @@
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       gap: 4px;
+      margin-top: 6px;
     }
     .slider-row {
       display: flex;
       align-items: center;
       gap: 8px;
-      margin: 4px 0;
+      margin: 6px 0;
     }
     .slider-row label {
-      min-width: 60px;
+      min-width: 80px;
       font-size: 0.8em;
       color: #888;
     }
     .slider-row input[type="range"] { flex: 1; }
     .slider-row .val {
-      min-width: 30px;
+      min-width: 55px;
       text-align: right;
-      font-size: 0.8em;
-      font-family: monospace;
+      font-size: 0.75em;
+      font-family: 'Consolas', monospace;
+      color: #0f9bef;
     }
+    .toggle-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+    }
+    .toggle-row label { font-size: 0.85em; color: #ccc; }
+    .toggle-switch {
+      position: relative;
+      width: 44px;
+      height: 22px;
+      cursor: pointer;
+    }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: #3a3a5a;
+      border-radius: 22px;
+      transition: 0.2s;
+    }
+    .toggle-slider::before {
+      content: '';
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      left: 3px;
+      bottom: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+    .toggle-switch input:checked + .toggle-slider {
+      background: #e94560;
+    }
+    .toggle-switch input:checked + .toggle-slider::before {
+      transform: translateX(22px);
+    }
+    .divider {
+      height: 1px;
+      background: #2a2a4a;
+      margin: 6px 0;
+    }
+    #toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #0f3460;
+      color: #fff;
+      padding: 10px 16px;
+      border-radius: 6px;
+      font-size: 0.85em;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+      z-index: 999;
+      border-left: 3px solid #e94560;
+    }
+    #toast.show { opacity: 1; }
+    .full-btn { width: 100%; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -166,88 +272,280 @@
     <div id="loading">Connecting to fpvdec...</div>
     <div id="fps-counter">0 FPS</div>
   </div>
+
   <div id="controls">
-    <h2>fpvdec Web UI</h2>
-    
-    <!-- Decoder Stats -->
-    <div class="section">
-      <h3>Decoder Status</h3>
-      <div id="stats">
-        <div class="stat"><span class="stat-label">Line Sync</span><span class="stat-value" id="line-sync">--</span></div>
-        <div class="stat"><span class="stat-label">V-Sync</span><span class="stat-value" id="vsync">--</span></div>
-        <div class="stat"><span class="stat-label">FPS</span><span class="stat-value" id="fps-stat">0</span></div>
-        <div class="stat"><span class="stat-label">Frame Count</span><span class="stat-value" id="frames">0</span></div>
-        <div class="stat"><span class="stat-label">Lines</span><span class="stat-value" id="lines">0</span></div>
-        <div class="stat"><span class="stat-label">Channel</span><span class="stat-value" id="channel">---</span></div>
-        <div class="stat"><span class="stat-label">Frequency</span><span class="stat-value" id="freq">--- MHz</span></div>
-        <div class="stat"><span class="stat-label">Clipping</span><span class="stat-value" id="clipping">NO</span></div>
-        <div class="stat"><span class="stat-label">Latency</span><span class="stat-value" id="latency">0 ms</span></div>
+    <div id="controls-header">
+      <h2>fpvdec</h2>
+      <button class="btn" id="btn-reset" title="Reset all settings to defaults">Reset</button>
+    </div>
+    <div id="controls-body">
+
+      <!-- Decoder Status -->
+      <div class="section" data-section="status">
+        <div class="section-header" onclick="toggleSection(this)">
+          <h3>Video</h3><span class="section-arrow">▼</span>
+        </div>
+        <div class="section-body">
+          <div class="stat"><span class="stat-label">Line Sync</span><span class="stat-value" id="line-sync">--</span></div>
+          <div class="stat"><span class="stat-label">V-Sync</span><span class="stat-value" id="vsync">--</span></div>
+          <div class="stat"><span class="stat-label">FPS</span><span class="stat-value" id="fps-stat">0</span></div>
+          <div class="stat"><span class="stat-label">Frames</span><span class="stat-value" id="frames">0</span></div>
+          <div class="stat"><span class="stat-label">Lines</span><span class="stat-value" id="lines">0</span></div>
+          <div class="stat"><span class="stat-label">Clipping</span><span class="stat-value" id="clipping">NO</span></div>
+          <div class="stat"><span class="stat-label">Latency</span><span class="stat-value" id="latency">0 ms</span></div>
+        </div>
       </div>
-    </div>
-    
-    <!-- AGC Info -->
-    <div class="section">
-      <h3>AGC / Gain</h3>
-      <div class="stat"><span class="stat-label">Mode</span><span class="stat-value" id="gain-mode">AUTO</span></div>
-      <div class="stat"><span class="stat-label">LNA</span><span class="stat-value" id="lna">--</span></div>
-      <div class="stat"><span class="stat-label">VGA</span><span class="stat-value" id="vga">--</span></div>
-      <div class="stat"><span class="stat-label">RF Amp</span><span class="stat-value" id="amp">ON</span></div>
-    </div>
-    
-    <!-- Channel Selection -->
-    <div class="section">
-      <h3>Channel</h3>
-      <select id="band-select">
-        <option value="A">Boscam A</option>
-        <option value="B">Boscam B</option>
-        <option value="E">E</option>
-        <option value="F">Airwave F</option>
-        <option value="R">Raceband R</option>
-      </select>
-      <div class="channel-grid" id="channel-grid" style="margin-top:8px;"></div>
-    </div>
-    
-    <!-- Controls -->
-    <div class="section">
-      <h3>Controls</h3>
-      <div class="btn-group">
-        <button class="btn" id="btn-gain-toggle">Toggle Gain</button>
-        <button class="btn" id="btn-amp">Toggle Amp</button>
-        <button class="btn" id="btn-lna-up">LNA +</button>
-        <button class="btn" id="btn-lna-down">LNA -</button>
-        <button class="btn" id="btn-vga-up">VGA +</button>
-        <button class="btn" id="btn-vga-down">VGA -</button>
+
+      <!-- Signal -->
+      <div class="section" data-section="signal">
+        <div class="section-header" onclick="toggleSection(this)">
+          <h3>Signal</h3><span class="section-arrow">▼</span>
+        </div>
+        <div class="section-body">
+          <div class="stat"><span class="stat-label">AGC Mode</span><span class="stat-value" id="gain-mode">--</span></div>
+          <div class="stat"><span class="stat-label">LNA</span><span class="stat-value" id="lna">--</span></div>
+          <div class="stat"><span class="stat-label">VGA</span><span class="stat-value" id="vga">--</span></div>
+          <div class="stat"><span class="stat-label">RF Amp</span><span class="stat-value" id="amp">--</span></div>
+          <div class="stat"><span class="stat-label">Burst Amp</span><span class="stat-value" id="burst-amp">0.0</span></div>
+          <div class="stat"><span class="stat-label">Ring Fill</span><span class="stat-value" id="ring-fill">0%</span></div>
+        </div>
       </div>
-    </div>
-    
-    <!-- Frequency Tuning -->
-    <div class="section">
-      <h3>Frequency</h3>
-      <div class="slider-row">
-        <label>Offset</label>
-        <input type="range" id="freq-offset" min="-1000000" max="1000000" step="50000" value="0">
-        <span class="val" id="freq-offset-val">0</span>
+
+      <!-- Channel -->
+      <div class="section" data-section="channel">
+        <div class="section-header" onclick="toggleSection(this)">
+          <h3>Channel</h3><span class="section-arrow">▼</span>
+        </div>
+        <div class="section-body">
+          <div class="stat"><span class="stat-label">Carrier</span><span class="stat-value" id="carrier-freq">--- MHz</span></div>
+          <div class="stat"><span class="stat-label">AFC</span><span class="stat-value" id="afc-status">--</span></div>
+          <select id="band-select" onchange="onBandChange()">
+            <option value="A">Boscam A</option>
+            <option value="B">Boscam B</option>
+            <option value="E">E</option>
+            <option value="F">Airwave F</option>
+            <option value="R">Raceband R</option>
+          </select>
+          <div class="channel-grid" id="channel-grid"></div>
+        </div>
       </div>
-    </div>
-    
-    <!-- Screenshot -->
-    <div class="section">
-      <h3>Export</h3>
-      <button class="btn" id="btn-screenshot" style="width:100%;">Download Screenshot</button>
-    </div>
-  </div>
+
+      <!-- RF Settings -->
+      <div class="section" data-section="rf">
+        <div class="section-header" onclick="toggleSection(this)">
+          <h3>RF</h3><span class="section-arrow">▼</span>
+        </div>
+        <div class="section-body">
+          <div class="slider-row">
+            <label>Deviation</label>
+            <input type="range" id="fm-dev" min="1000000" max="10000000" step="250000" value="5000000">
+            <span class="val" id="fm-dev-val">5.0 MHz</span>
+          </div>
+          <div class="slider-row">
+            <label>Offset</label>
+            <input type="range" id="freq-offset" min="-2000000" max="2000000" step="50000" value="0">
+            <span class="val" id="freq-offset-val">0 Hz</span>
+          </div>
+          <div class="toggle-row">
+            <label>Invert Polarity</label>
+            <label class="toggle-switch">
+              <input type="checkbox" id="invert-toggle" onchange="onInvertChange()">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="toggle-row">
+            <label>AFC Enabled</label>
+            <label class="toggle-switch">
+              <input type="checkbox" id="afc-toggle" onchange="onAfcChange()">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="divider"></div>
+          <div class="slider-row">
+            <label>Sample Rate</label>
+            <input type="range" id="sample-rate" min="6000000" max="20000000" step="1000000" value="10000000">
+            <span class="val" id="sample-rate-val">10 MHz</span>
+          </div>
+          <div class="slider-row">
+            <label>Video LPF</label>
+            <input type="range" id="video-lpf" min="0" max="6000000" step="250000" value="0">
+            <span class="val" id="video-lpf-val">Off</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Color -->
+      <div class="section" data-section="color">
+        <div class="section-header" onclick="toggleSection(this)">
+          <h3>Color</h3><span class="section-arrow">▼</span>
+        </div>
+        <div class="section-body">
+          <div class="slider-row">
+            <label>Saturation</label>
+            <input type="range" id="saturation" min="0" max="200" step="5" value="100">
+            <span class="val" id="saturation-val">1.00</span>
+          </div>
+          <div class="slider-row">
+            <label>Hue</label>
+            <input type="range" id="hue-deg" min="-180" max="180" step="1" value="0">
+            <span class="val" id="hue-deg-val">0°</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Denoise -->
+      <div class="section" data-section="denoise">
+        <div class="section-header" onclick="toggleSection(this)">
+          <h3>Denoise</h3><span class="section-arrow">▼</span>
+        </div>
+        <div class="section-body">
+          <div class="slider-row">
+            <label>Spatial</label>
+            <input type="range" id="denoise" min="0" max="100" step="5" value="0">
+            <span class="val" id="denoise-val">0%</span>
+          </div>
+          <div class="slider-row">
+            <label>Temporal IIR</label>
+            <input type="range" id="denoise-temporal" min="0" max="100" step="5" value="0">
+            <span class="val" id="denoise-temporal-val">0%</span>
+          </div>
+          <div class="slider-row">
+            <label>Temporal Median</label>
+            <input type="range" id="denoise-med" min="0" max="9" step="2" value="0">
+            <span class="val" id="denoise-med-val">Off</span>
+          </div>
+          <div class="slider-row">
+            <label>Med Strength</label>
+            <input type="range" id="denoise-med-strength" min="0" max="100" step="5" value="100">
+            <span class="val" id="denoise-med-strength-val">1.0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Resolution -->
+      <div class="section" data-section="resolution">
+        <div class="section-header" onclick="toggleSection(this)">
+          <h3>Resolution</h3><span class="section-arrow">▼</span>
+        </div>
+        <div class="section-body">
+          <div class="slider-row">
+            <label>Width</label>
+            <input type="range" id="res-w" min="320" max="1920" step="160" value="640">
+            <span class="val" id="res-w-val">640</span>
+          </div>
+          <div class="slider-row">
+            <label>Height</label>
+            <input type="range" id="res-h" min="240" max="1080" step="120" value="480">
+            <span class="val" id="res-h-val">480</span>
+          </div>
+          <div class="slider-row">
+            <label>Overscan</label>
+            <input type="range" id="overscan" min="0" max="15" step="1" value="0">
+            <span class="val" id="overscan-val">0%</span>
+          </div>
+          <div class="toggle-row">
+            <label>Auto-Detect</label>
+            <label class="toggle-switch">
+              <input type="checkbox" id="auto-detect-toggle" onchange="onAutoDetectChange()">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="section" data-section="actions">
+        <div class="section-header" onclick="toggleSection(this)">
+          <h3>Actions</h3><span class="section-arrow">▼</span>
+        </div>
+        <div class="section-body">
+          <button class="btn full-btn" id="btn-gain-toggle">Toggle Gain (Auto/Manual)</button>
+          <button class="btn full-btn" id="btn-amp-toggle" style="margin-top:4px">Toggle RF Amp</button>
+          <button class="btn full-btn" id="btn-screenshot" style="margin-top:4px">Download Screenshot</button>
+        </div>
+      </div>
+
+    </div><!-- /controls-body -->
+  </div><!-- /controls -->
+
+  <div id="toast"></div>
 
   <script>
     const BASE = window.location.origin;
     const video = document.getElementById('video');
     const loading = document.getElementById('loading');
     const fpsCounter = document.getElementById('fps-counter');
-    
+    const toastEl = document.getElementById('toast');
+
     let lastFrameSeq = 0;
     let fpsFrames = 0;
     let fpsTime = Date.now();
-    
-    // Channel frequencies (MHz)
+    let configDirty = false;
+
+    // ── Debounced config send ──────────────────────────────────────────────
+    let debounceTimer = null;
+    let pendingConfig = {};
+
+    function scheduleConfigSend() {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(sendConfigBatch, 250);
+    }
+
+    function queueConfig(key, value) {
+      // Coerce to number if it looks numeric
+      if (typeof value === 'string' && !isNaN(Number(value)) && value.trim() !== '') {
+        pendingConfig[key] = Number(value);
+      } else if (typeof value === 'boolean') {
+        pendingConfig[key] = value;
+      } else if (typeof value === 'number') {
+        pendingConfig[key] = value;
+      } else {
+        pendingConfig[key] = value;
+      }
+    }
+
+    function sendConfigBatch() {
+      if (Object.keys(pendingConfig).length === 0) return;
+      fetch(`${BASE}/api/config/set`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(pendingConfig)
+      }).catch(err => {
+        console.error('Config send failed:', err);
+        showToast('Config send failed');
+      });
+      pendingConfig = {};
+      debounceTimer = null;
+    }
+
+    function updateSliderDisplay(sliderId, valElId, formatter) {
+      const slider = document.getElementById(sliderId);
+      const valEl = document.getElementById(valElId);
+      if (slider && valEl) {
+        valEl.textContent = formatter ? formatter(slider.value) : slider.value;
+      }
+    }
+
+    function bindSlider(sliderId, valElId, configKey, formatter, onInputCb) {
+      const slider = document.getElementById(sliderId);
+      const valEl = document.getElementById(valElId);
+      if (!slider) return;
+      const fmt = formatter || (v => v);
+      slider.value = 0; // will be set from config
+
+      slider.addEventListener('input', (e) => {
+        valEl.textContent = fmt(e.target.value);
+        queueConfig(configKey, e.target.value);
+        configDirty = true;
+        if (onInputCb) onInputCb(e.target.value);
+      });
+      slider.addEventListener('change', () => {
+        valEl.textContent = fmt(slider.value);
+        sendConfigBatch(); // send immediately on release
+      });
+    }
+
+    // ── Channel selection ─────────────────────────────────────────────────
     const CHANNELS = {
       A: [5865,5845,5825,5805,5785,5765,5745,5725],
       B: [5733,5752,5771,5790,5809,5828,5847,5866],
@@ -257,137 +555,364 @@
     };
     let selectedBand = 'A';
     let selectedChannel = 0;
-    
-    // Build channel grid
+
     function buildChannelGrid() {
       const grid = document.getElementById('channel-grid');
       grid.innerHTML = '';
       CHANNELS[selectedBand].forEach((freq, i) => {
         const btn = document.createElement('button');
         btn.className = 'channel-btn' + (selectedChannel === i ? ' active' : '');
-        btn.textContent = (i+1);
+        btn.textContent = (i + 1);
         btn.onclick = () => selectChannel(selectedBand, i);
         grid.appendChild(btn);
       });
     }
-    
+
     function selectChannel(band, idx) {
       selectedBand = band;
       selectedChannel = idx;
       document.getElementById('band-select').value = band;
       buildChannelGrid();
-      sendConfig('channel', `${band}${idx+1}`);
+      queueConfig('video_carrier_hz', CHANNELS[band][idx] * 1e6);
+      configDirty = true;
+      sendConfigBatch();
     }
-    
-    document.getElementById('band-select').onchange = (e) => {
-      selectedBand = e.target.value;
+
+    function onBandChange() {
+      selectedBand = document.getElementById('band-select').value;
       selectedChannel = 0;
       buildChannelGrid();
-    };
-    
-    function sendConfig(key, value) {
-      fetch(`${BASE}/api/set`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: `${key}=${encodeURIComponent(value)}`
-      }).catch(err => console.error('Config error:', err));
     }
-    
-    // Fetch stats periodically
-    async function updateStats() {
-      try {
-        const res = await fetch(`${BASE}/api/stats`);
-        if (res.ok) {
-          const stats = await res.json();
-          document.getElementById('line-sync').textContent = stats.line_locked ? 'LOCKED' : 'LOST';
-          document.getElementById('line-sync').className = 'stat-value ' + (stats.line_locked ? 'locked' : 'unlocked');
-          document.getElementById('vsync').textContent = stats.vsync_locked ? 'LOCKED' : 'LOST';
-          document.getElementById('vsync').className = 'stat-value ' + (stats.vsync_locked ? 'locked' : 'unlocked');
-          document.getElementById('fps-stat').textContent = stats.fps ? stats.fps.toFixed(1) : '0';
-          document.getElementById('frames').textContent = stats.frames || 0;
-          document.getElementById('lines').textContent = stats.lines || 0;
-          document.getElementById('channel').textContent = stats.channel || '---';
-          document.getElementById('freq').textContent = stats.freq_mhz ? stats.freq_mhz.toFixed(2) + ' MHz' : '--- MHz';
-          document.getElementById('clipping').textContent = stats.clipping ? 'YES' : 'NO';
-          document.getElementById('clipping').className = 'stat-value ' + (stats.clipping ? 'unlocked' : 'locked');
-          document.getElementById('latency').textContent = stats.video_latency_ms ? stats.video_latency_ms.toFixed(0) + ' ms' : '0 ms';
-          document.getElementById('gain-mode').textContent = stats.gain_auto ? 'AUTO' : 'MANUAL';
-          document.getElementById('lna').textContent = stats.lna;
-          document.getElementById('vga').textContent = stats.vga;
-          document.getElementById('amp').textContent = stats.amp ? 'ON' : 'OFF';
-          document.getElementById('amp').className = 'stat-value ' + (stats.amp ? 'locked' : 'warn');
-        }
-      } catch (e) { /* ignore */ }
+
+    // ── Config read-back (GET /api/config) ─────────────────────────────────
+    let lastConfigHash = '';
+
+    function fetchConfig() {
+      fetch(`${BASE}/api/config?t=${Date.now()}`)
+        .then(r => r.json())
+        .then(cfg => {
+          // Build a simple hash to detect changes
+          const hash = JSON.stringify(cfg);
+          if (hash === lastConfigHash) return;
+          lastConfigHash = hash;
+
+          // Sync UI elements to config values
+          // Carrier freq
+          if (cfg.video_carrier_hz) {
+            const mhz = (cfg.video_carrier_hz / 1e6).toFixed(2);
+            document.getElementById('carrier-freq').textContent = mhz + ' MHz';
+          }
+          // AFC toggle
+          if (cfg.afc !== undefined) {
+            document.getElementById('afc-toggle').checked = cfg.afc;
+            document.getElementById('afc-status').textContent = cfg.afc ? 'ON' : 'OFF';
+            document.getElementById('afc-status').className = 'stat-value ' + (cfg.afc ? 'locked' : 'unlocked');
+          }
+          // Invert toggle
+          if (cfg.invert !== undefined) {
+            document.getElementById('invert-toggle').checked = cfg.invert;
+          }
+          // FM Deviation
+          if (cfg.fm_dev_hz) {
+            document.getElementById('fm-dev').value = Math.round(cfg.fm_dev_hz / 250000) * 250000;
+            document.getElementById('fm-dev-val').textContent = (cfg.fm_dev_hz / 1e6).toFixed(1) + ' MHz';
+          }
+          // Offset
+          if (cfg.offset_hz !== undefined) {
+            document.getElementById('freq-offset').value = Math.round(cfg.offset_hz);
+            const offHz = Math.round(cfg.offset_hz);
+            document.getElementById('freq-offset-val').textContent = offHz === 0 ? '0 Hz' :
+              (Math.abs(offHz) >= 1e6 ? (offHz/1e6).toFixed(2)+' MHz' : (offHz/1e3).toFixed(0)+' kHz');
+          }
+          // Sample Rate
+          if (cfg.sample_rate) {
+            document.getElementById('sample-rate').value = Math.round(cfg.sample_rate / 1e6) * 1e6;
+            document.getElementById('sample-rate-val').textContent = (cfg.sample_rate / 1e6).toFixed(0) + ' MHz';
+          }
+          // Video LPF
+          if (cfg.video_lpf_hz !== undefined) {
+            document.getElementById('video-lpf').value = Math.round(cfg.video_lpf_hz / 250000) * 250000;
+            const lpf = cfg.video_lpf_hz;
+            document.getElementById('video-lpf-val').textContent = lpf === 0 ? 'Off' :
+              (lpf / 1e6).toFixed(2) + ' MHz';
+          }
+          // Saturation
+          if (cfg.saturation !== undefined) {
+            const satPct = Math.round(cfg.saturation * 100);
+            document.getElementById('saturation').value = satPct;
+            document.getElementById('saturation-val').textContent = cfg.saturation.toFixed(2);
+          }
+          // Hue
+          if (cfg.hue_deg !== undefined) {
+            document.getElementById('hue-deg').value = Math.round(cfg.hue_deg);
+            document.getElementById('hue-deg-val').textContent = Math.round(cfg.hue_deg) + '°';
+          }
+          // Denoise
+          if (cfg.denoise !== undefined) {
+            document.getElementById('denoise').value = Math.round(cfg.denoise * 100);
+            document.getElementById('denoise-val').textContent = Math.round(cfg.denoise * 100) + '%';
+          }
+          if (cfg.denoise_temporal !== undefined) {
+            document.getElementById('denoise-temporal').value = Math.round(cfg.denoise_temporal * 100);
+            document.getElementById('denoise-temporal-val').textContent = Math.round(cfg.denoise_temporal * 100) + '%';
+          }
+          if (cfg.denoise_temporal_median !== undefined) {
+            const med = cfg.denoise_temporal_median;
+            const val = med === 0 ? 0 : med - 1; // 0 off, odd vals 3-9 map to 0,2,4,6,8
+            document.getElementById('denoise-med').value = val;
+            document.getElementById('denoise-med-val').textContent = med === 0 ? 'Off' : med;
+          }
+          if (cfg.denoise_temporal_median_strength !== undefined) {
+            document.getElementById('denoise-med-strength').value = Math.round(cfg.denoise_temporal_median_strength * 100);
+            document.getElementById('denoise-med-strength-val').textContent = cfg.denoise_temporal_median_strength.toFixed(2);
+          }
+          // Resolution
+          if (cfg.frame_width) {
+            document.getElementById('res-w').value = Math.round(cfg.frame_width / 160) * 160;
+            document.getElementById('res-w-val').textContent = cfg.frame_width;
+          }
+          if (cfg.frame_height) {
+            document.getElementById('res-h').value = Math.round(cfg.frame_height / 120) * 120;
+            document.getElementById('res-h-val').textContent = cfg.frame_height;
+          }
+          if (cfg.overscan !== undefined) {
+            document.getElementById('overscan').value = Math.round(cfg.overscan * 100);
+            document.getElementById('overscan-val').textContent = Math.round(cfg.overscan * 100) + '%';
+          }
+          // Auto-detect
+          if (cfg.auto_detect !== undefined) {
+            document.getElementById('auto-detect-toggle').checked = cfg.auto_detect;
+          }
+          // Channel band
+          if (cfg.video_carrier_hz) {
+            for (const [band, freqs] of Object.entries(CHANNELS)) {
+              for (let i = 0; i < freqs.length; i++) {
+                if (Math.abs(cfg.video_carrier_hz - freqs[i] * 1e6) < 500000) {
+                  if (selectedBand !== band || selectedChannel !== i) {
+                    selectedBand = band;
+                    selectedChannel = i;
+                    document.getElementById('band-select').value = band;
+                    buildChannelGrid();
+                  }
+                  break;
+                }
+              }
+            }
+          }
+        })
+        .catch(() => {}); // ignore fetch errors
     }
-    
-    // Fetch frame as JPEG
+
+    // ── Stats read-back (GET /api/stats) ───────────────────────────────────
+    function fetchStats() {
+      fetch(`${BASE}/api/stats?t=${Date.now()}`)
+        .then(r => r.json())
+        .then(s => {
+          // Line / Vsync
+          document.getElementById('line-sync').textContent = s.line_locked ? 'LOCKED' : 'LOST';
+          document.getElementById('line-sync').className = 'stat-value ' + (s.line_locked ? 'locked' : 'unlocked');
+          document.getElementById('vsync').textContent = s.vsync_locked ? 'LOCKED' : 'LOST';
+          document.getElementById('vsync').className = 'stat-value ' + (s.vsync_locked ? 'locked' : 'unlocked');
+          document.getElementById('fps-stat').textContent = s.fps ? s.fps.toFixed(1) : '0';
+          document.getElementById('frames').textContent = s.frames || 0;
+          document.getElementById('lines').textContent = s.lines || 0;
+          document.getElementById('clipping').textContent = s.clipping ? 'YES' : 'NO';
+          document.getElementById('clipping').className = 'stat-value ' + (s.clipping ? 'unlocked' : 'locked');
+          document.getElementById('latency').textContent = s.video_latency_ms ? s.video_latency_ms.toFixed(0) + ' ms' : '0 ms';
+
+          // AGC / Signal
+          document.getElementById('gain-mode').textContent = s.gain_auto ? 'AUTO' : 'MANUAL';
+          document.getElementById('gain-mode').className = 'stat-value ' + (s.gain_auto ? 'locked' : 'warn');
+          document.getElementById('lna').textContent = s.lna;
+          document.getElementById('vga').textContent = s.vga;
+          document.getElementById('amp').textContent = s.amp ? 'ON' : 'OFF';
+          document.getElementById('amp').className = 'stat-value ' + (s.amp ? 'locked' : 'warn');
+          document.getElementById('burst-amp').textContent = s.burst_amp ? s.burst_amp.toFixed(1) : '0.0';
+          document.getElementById('ring-fill').textContent = s.ring_fill ? s.ring_fill.toFixed(0) + '%' : '0%';
+        })
+        .catch(() => {});
+    }
+
+    // ── Video frame fetch ──────────────────────────────────────────────────
     async function updateFrame() {
       try {
         const res = await fetch(`${BASE}/api/frame?t=${Date.now()}`);
         if (!res.ok || !res.body) return;
-        
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         video.onload = () => URL.revokeObjectURL(url);
         video.src = url;
         loading.style.display = 'none';
-        
-        // FPS counter
         fpsFrames++;
         const now = Date.now();
         if (now - fpsTime >= 1000) {
-          const fps = Math.round(fpsFrames * 1000 / (now - fpsTime));
-          fpsCounter.textContent = fps + ' FPS';
+          fpsCounter.textContent = Math.round(fpsFrames * 1000 / (now - fpsTime)) + ' FPS';
           fpsFrames = 0;
           fpsTime = now;
         }
       } catch (e) { /* ignore */ }
     }
-    
-    // Controls
-    document.getElementById('btn-gain-toggle').onclick = () => sendConfig('gain', document.getElementById('gain-mode').textContent.toLowerCase());
-    document.getElementById('btn-amp').onclick = () => sendConfig('amp', !document.getElementById('amp').textContent.startsWith('O') ? 'on' : 'off');
-    document.getElementById('btn-lna-up').onclick = () => sendConfig('lna', parseInt(document.getElementById('lna').textContent || 0) + 8);
-    document.getElementById('btn-lna-down').onclick = () => sendConfig('lna', Math.max(0, parseInt(document.getElementById('lna').textContent || 0) - 8));
-    document.getElementById('btn-vga-up').onclick = () => sendConfig('vga', parseInt(document.getElementById('vga').textContent || 0) + 2);
-    document.getElementById('btn-vga-down').onclick = () => sendConfig('vga', Math.max(0, parseInt(document.getElementById('vga').textContent || 0) - 2));
-    
-    document.getElementById('freq-offset').oninput = (e) => {
-      document.getElementById('freq-offset-val').textContent = e.target.value;
-      sendConfig('offset', e.target.value);
-    };
-    
-    document.getElementById('btn-screenshot').onclick = async () => {
-      try {
-        const res = await fetch(`${BASE}/api/frame?t=${Date.now()}`);
-        if (!res.ok) { console.error('Screenshot failed'); return; }
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `fpvdec_${Date.now()}.jpg`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      } catch (e) { console.error('Screenshot error:', e); }
-    };
-    
-    // Initialize
-    buildChannelGrid();
-    
-    // Polling loop
-    let lastStatsTime = 0;
-    function poll() {
-      updateFrame();
-      const now = Date.now();
-      if (now - lastStatsTime > 200) {
-        updateStats();
-        lastStatsTime = now;
-      }
-      requestAnimationFrame(poll);
+
+    // ── Toggle helpers ─────────────────────────────────────────────────────
+    function onAfcChange() {
+      const checked = document.getElementById('afc-toggle').checked;
+      document.getElementById('afc-status').textContent = checked ? 'ON' : 'OFF';
+      document.getElementById('afc-status').className = 'stat-value ' + (checked ? 'locked' : 'unlocked');
+      queueConfig('afc', checked);
+      configDirty = true;
+      sendConfigBatch();
     }
-    poll();
+    function onInvertChange() {
+      queueConfig('invert', document.getElementById('invert-toggle').checked);
+      configDirty = true;
+      sendConfigBatch();
+    }
+    function onAutoDetectChange() {
+      queueConfig('auto_detect', document.getElementById('auto-detect-toggle').checked);
+      configDirty = true;
+      sendConfigBatch();
+    }
+
+    // ── Slider bindings ────────────────────────────────────────────────────
+    function init() {
+      buildChannelGrid();
+
+      // RF sliders
+      bindSlider('fm-dev', 'fm-dev-val', 'fm_dev_hz', v => (v/1e6).toFixed(1) + ' MHz');
+      bindSlider('freq-offset', 'freq-offset-val', 'offset_hz', v => {
+        const n = parseInt(v);
+        return n === 0 ? '0 Hz' : (Math.abs(n) >= 1e6 ? (n/1e6).toFixed(2)+' MHz' : (n/1e3).toFixed(0)+' kHz');
+      });
+      bindSlider('sample-rate', 'sample-rate-val', 'sample_rate', v => (v/1e6).toFixed(0) + ' MHz');
+      bindSlider('video-lpf', 'video-lpf-val', 'video_lpf_hz', v => v === '0' ? 'Off' : (v/1e6).toFixed(2) + ' MHz');
+
+      // Color
+      bindSlider('saturation', 'saturation-val', 'saturation', v => (v/100).toFixed(2));
+      bindSlider('hue-deg', 'hue-deg-val', 'hue_deg', v => v + '°');
+
+      // Denoise
+      bindSlider('denoise', 'denoise-val', 'denoise', v => v + '%');
+      bindSlider('denoise-temporal', 'denoise-temporal-val', 'denoise_temporal', v => v + '%');
+      bindSlider('denoise-med', 'denoise-med-val', null, v => {
+        const n = parseInt(v);
+        return n === 0 ? 'Off' : (n + 1);
+      }, v => {
+        const n = parseInt(v);
+        queueConfig('denoise_temporal_median', n === 0 ? 0 : (n + 1));
+        configDirty = true;
+        sendConfigBatch();
+      });
+
+      // Resolution
+      bindSlider('res-w', 'res-w-val', 'frame_width', v => v);
+      bindSlider('res-h', 'res-h-val', 'frame_height', v => v);
+      bindSlider('overscan', 'overscan-val', 'overscan', v => v + '%');
+
+      // Buttons
+      document.getElementById('btn-gain-toggle').onclick = () => {
+        fetch(`${BASE}/api/config/set`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({gain_auto: false})
+        }).then(() => {
+          // toggle next click
+          document.getElementById('btn-gain-toggle').classList.toggle('active');
+        });
+      };
+      document.getElementById('btn-amp-toggle').onclick = () => {
+        const val = document.getElementById('amp').textContent === 'ON';
+        fetch(`${BASE}/api/config/set`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({amp: !val})
+        }).catch(() => {});
+      };
+      document.getElementById('btn-screenshot').onclick = async () => {
+        try {
+          const res = await fetch(`${BASE}/api/frame?t=${Date.now()}`);
+          if (!res.ok) return;
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'fpvdec_' + Date.now() + '.jpg';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        } catch (e) { console.error('Screenshot error:', e); }
+      };
+
+      // Reset button
+      document.getElementById('btn-reset').onclick = () => {
+        if (!confirm('Reset all settings to defaults?')) return;
+        const defaults = {
+          video_carrier_hz: 5800000000,
+          sample_rate: 10000000,
+          offset_hz: 0,
+          lna_gain: 40,
+          vga_gain: 20,
+          amp: true,
+          gain_auto: true,
+          fm_dev_hz: 5000000,
+          invert: false,
+          afc: true,
+          video_lpf_hz: 0,
+          saturation: 1.0,
+          hue_deg: 0,
+          denoise: 0,
+          denoise_temporal: 0,
+          denoise_temporal_median: 0,
+          denoise_temporal_median_strength: 1.0,
+          overscan: 0,
+          frame_width: 640,
+          frame_height: 480,
+          auto_detect: false,
+          clkout: true,
+          enforce_clkin: false
+        };
+        fetch(`${BASE}/api/config/set`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(defaults)
+        }).then(() => fetchConfig()).catch(() => showToast('Reset failed'));
+      };
+
+      // Initial load
+      fetchConfig();
+      fetchStats();
+
+      // Polling loops
+      let lastStatsTime = 0;
+      function poll() {
+        updateFrame();
+        const now = Date.now();
+        if (now - lastStatsTime > 200) {
+          fetchStats();
+          lastStatsTime = now;
+        }
+        requestAnimationFrame(poll);
+      }
+      poll();
+
+      // Config poll every 1s
+      setInterval(fetchConfig, 1000);
+    }
+
+    // ── Section collapse/expand ────────────────────────────────────────────
+    function toggleSection(header) {
+      const section = header.closest('.section');
+      section.classList.toggle('collapsed');
+    }
+
+    // ── Toast ──────────────────────────────────────────────────────────────
+    function showToast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      setTimeout(() => toastEl.classList.remove('show'), 2500);
+    }
+
+    init();
   </script>
 </body>
 </html>
