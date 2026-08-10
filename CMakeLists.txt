@@ -56,11 +56,23 @@ add_executable(fpvdec
     src/source/hackrf_source.cpp
     src/ui/sdl_display.cpp
     src/ui/gui_manager.cpp
+    src/ui/web_display.cpp
     src/filter/filter.cpp
     src/filter/denoiser.cpp
     src/filter/temporal.cpp
     src/filter/temporal_median.cpp
 )
+
+# WebGUI (Web-based display mode via cpp-httplib): allows headless server mode
+# with a browser-based control panel. Requires cpp-httplib (vendored in third_party).
+option(WEBGUI "Enable Web GUI mode (browser-based display via cpp-httplib)" OFF)
+if(WEBGUI)
+    message(STATUS "Web GUI mode enabled")
+    target_include_directories(fpvdec PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+    find_package(Threads REQUIRED)
+    target_link_libraries(fpvdec PRIVATE Threads::Threads)
+    target_compile_definitions(fpvdec PRIVATE HAVE_WEBGUI)
+endif()
 
 # Add SoapySDR source and dependencies if enabled
 if(SOAPYSDR)

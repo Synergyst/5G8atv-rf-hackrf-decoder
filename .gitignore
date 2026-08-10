@@ -4,6 +4,9 @@ build-*/
 
 # Third-party dependencies (vendored)
 third_party/
+# ... except these
+!third_party/httplib.h
+!third_party/webgui/
 
 # Generated test/artifact files
 *.cs8
