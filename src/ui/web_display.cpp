@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -23,6 +24,89 @@
 
 namespace famidec {
 #ifdef HAVE_WEBGUI
+
+// ── JSON helpers ─────────────────────────────────────────────────────────────
+
+static void json_escape(std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        if (c == '"')  { out += '\\'; out += '"'; }
+        else if (c == '\\') { out += '\\'; out += '\\'; }
+        else if (c == '\n') { out += '\\'; out += 'n'; }
+        else if (c == '\r') { out += '\\'; out += 'r'; }
+        else if (c == '\t') { out += '\\'; out += 't'; }
+        else out += c;
+    }
+    s = std::move(out);
+}
+
+// Minimal JSON builder — avoids pulling in a full JSON library.
+static std::string json_obj_start() { return "{\n"; }
+static std::string json_obj_end()   { return "\n}"; }
+static std::string json_bool(const char* k, bool v) {
+    return std::string("  \"") + k + "\": " + (v ? "true" : "false") + ",\n";
+}
+static std::string json_int(const char* k, int v) {
+    return std::string("  \"") + k + "\": " + std::to_string(v) + ",\n";
+}
+static std::string json_uint(const char* k, uint64_t v) {
+    return std::string("  \"") + k + "\": " + std::to_string(v) + ",\n";
+}
+static std::string json_double(const char* k, double v) {
+    // Use %.3g to avoid trailing zeros while keeping precision.
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.3g", v);
+    return std::string("  \"") + k + "\": " + buf + ",\n";
+}
+static std::string json_float(const char* k, float v) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.4g", v);
+    return std::string("  \"") + k + "\": " + buf + ",\n";
+}
+static std::string json_str(const char* k, const std::string& v) {
+    std::string esc(v);
+    json_escape(esc);
+    return std::string("  \"") + k + "\": \"" + esc + "\",\n";
+}
+
+static std::string config_to_json(const Config& cfg) {
+    std::string j;
+    j += json_obj_start();
+    // RF
+    j += json_double("video_carrier_hz", cfg.video_carrier_hz);
+    j += json_double("sample_rate", cfg.sample_rate);
+    j += json_double("offset_hz", cfg.offset_hz);
+    j += json_int("lna_gain", cfg.lna_gain);
+    j += json_int("vga_gain", cfg.vga_gain);
+    j += json_bool("amp", cfg.amp);
+    j += json_bool("gain_auto", cfg.gain_auto);
+    // FM/Video
+    j += json_double("fm_dev_hz", cfg.fm_dev_hz);
+    j += json_bool("invert", cfg.invert);
+    j += json_bool("afc", cfg.afc);
+    j += json_double("video_lpf_hz", cfg.video_lpf_hz);
+    // Color
+    j += json_float("saturation", cfg.saturation);
+    j += json_float("hue_deg", cfg.hue_deg);
+    // Denoise
+    j += json_float("denoise", cfg.denoise);
+    j += json_float("denoise_temporal", cfg.denoise_temporal);
+    j += json_int("denoise_temporal_median", cfg.denoise_temporal_median);
+    j += json_float("denoise_temporal_median_strength", cfg.denoise_temporal_median_strength);
+    // Crop
+    j += json_float("overscan", cfg.overscan);
+    // Resolution
+    j += json_int("frame_width", cfg.frame_width);
+    j += json_int("frame_height", cfg.frame_height);
+    // Auto-detect
+    j += json_bool("auto_detect", cfg.auto_detect);
+    // GPSDO
+    j += json_bool("clkout", cfg.clkout);
+    j += json_bool("enforce_clkin", cfg.enforce_clkin);
+    j += json_obj_end();
+    return j;
+}
 
 // ── JPEG encoding (libjpeg-turbo) via tmpfile ────────────────────────────────
 
@@ -225,6 +309,143 @@ void WebDisplay::server_thread_func() {
         ss << "\"video_latency_ms\":" << s.video_latency_ms;
         ss << "}";
         res.set_content(ss.str(), "application/json");
+    });
+
+    // ── /api/config → JSON (full Config snapshot) ──
+    svr.Get("/api/config", [this](const httplib::Request&, httplib::Response& res) {
+        if (!cfg_) {
+            res.set_content("{}", "application/json");
+            res.status = 503;
+            return;
+        }
+        res.set_content(config_to_json(*cfg_), "application/json");
+    });
+
+    // ── /api/config/set → apply full or partial Config JSON ──
+    svr.Post("/api/config/set", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!cfg_) {
+            res.set_content("{\"ok\":false,\"error\":\"no config\"}", "application/json");
+            res.status = 503;
+            return;
+        }
+        const std::string& body = req.body;
+        if (body.empty()) {
+            res.set_content("{\"ok\":false,\"error\":\"empty body\"}", "application/json");
+            res.status = 400;
+            return;
+        }
+        // Minimal JSON field extractor: parse key:value pairs from body.
+        // Supports integers, floats, booleans, strings.
+        auto extract_json_field = [&](const std::string& name) -> std::optional<std::string> {
+            // Look for "name": value patterns
+            std::string search = std::string("\"") + name + std::string("\"");
+            auto pos = body.find(search);
+            if (pos == std::string::npos) return std::nullopt;
+            pos += search.size();
+            // Skip whitespace and colon
+            while (pos < body.size() && (body[pos] == ' ' || body[pos] == ':' || body[pos] == '\t')) ++pos;
+            if (pos >= body.size()) return std::nullopt;
+            std::string val;
+            if (body[pos] == '"') {
+                // String value
+                ++pos;
+                while (pos < body.size() && body[pos] != '"') {
+                    if (body[pos] == '\\' && pos + 1 < body.size()) {
+                        val += body[pos + 1];
+                        ++pos;
+                    } else {
+                        val += body[pos];
+                    }
+                    ++pos;
+                }
+            } else {
+                // Numeric or boolean value — read until comma, brace, or newline
+                while (pos < body.size() && body[pos] != ',' && body[pos] != '}' && body[pos] != '\n') {
+                    val += body[pos];
+                    ++pos;
+                }
+            }
+            return val;
+        };
+
+        // ── Boolean fields ──
+        auto set_bool = [&](const std::string& name, bool& target) {
+            auto v = extract_json_field(name);
+            if (v && (*v == "true" || *v == "1")) target = true;
+            else if (v && (*v == "false" || *v == "0")) target = false;
+        };
+        set_bool("afc", cfg_->afc);
+        set_bool("invert", cfg_->invert);
+        set_bool("gain_auto", cfg_->gain_auto);
+        set_bool("amp", cfg_->amp);
+        set_bool("auto_detect", cfg_->auto_detect);
+        set_bool("clkout", cfg_->clkout);
+        set_bool("enforce_clkin", cfg_->enforce_clkin);
+
+        // ── Integer fields ──
+        auto set_int = [&](const std::string& name, int& target) {
+            auto v = extract_json_field(name);
+            if (v) {
+                int val = std::atoi(v->c_str());
+                if (name == "lna_gain") cfg_->lna_gain = std::clamp((val / 8) * 8, 0, 40);
+                else if (name == "vga_gain") cfg_->vga_gain = std::clamp((val / 2) * 2, 0, 62);
+                else if (name == "denoise_temporal_median") {
+                    int n = std::clamp(val, 3, 9);
+                    if (n % 2 == 0) ++n;
+                    cfg_->denoise_temporal_median = n;
+                }
+                else if (name == "frame_width") cfg_->frame_width = std::max(1, val);
+                else if (name == "frame_height") cfg_->frame_height = std::max(1, val);
+                else cfg_->frame_width = val; // fallback
+            }
+        };
+        set_int("lna_gain", cfg_->lna_gain);
+        set_int("vga_gain", cfg_->vga_gain);
+        set_int("denoise_temporal_median", cfg_->denoise_temporal_median);
+        set_int("frame_width", cfg_->frame_width);
+        set_int("frame_height", cfg_->frame_height);
+
+        // ── Double fields ──
+        auto set_double = [&](const std::string& name, double& target) {
+            auto v = extract_json_field(name);
+            if (v) target = std::atof(v->c_str());
+        };
+        set_double("video_carrier_hz", cfg_->video_carrier_hz);
+        set_double("offset_hz", cfg_->offset_hz);
+        set_double("sample_rate", cfg_->sample_rate);
+        set_double("fm_dev_hz", cfg_->fm_dev_hz);
+        set_double("video_lpf_hz", cfg_->video_lpf_hz);
+
+        // ── Float fields ──
+        auto set_float = [&](const std::string& name, float& target) {
+            auto v = extract_json_field(name);
+            if (v) target = static_cast<float>(std::atof(v->c_str()));
+        };
+        set_float("saturation", cfg_->saturation);
+        set_float("hue_deg", cfg_->hue_deg);
+        set_float("denoise", cfg_->denoise);
+        set_float("denoise_temporal", cfg_->denoise_temporal);
+        set_float("denoise_temporal_median_strength", cfg_->denoise_temporal_median_strength);
+        set_float("overscan", cfg_->overscan);
+
+        // Clamp floats
+        cfg_->saturation = std::clamp(cfg_->saturation, 0.0f, 2.0f);
+        cfg_->denoise = std::clamp(cfg_->denoise, 0.0f, 1.0f);
+        cfg_->denoise_temporal = std::clamp(cfg_->denoise_temporal, 0.0f, 1.0f);
+        cfg_->denoise_temporal_median_strength = std::clamp(cfg_->denoise_temporal_median_strength, 0.0f, 1.0f);
+        cfg_->overscan = std::clamp(cfg_->overscan, 0.0f, 0.15f);
+
+        // ── Apply hardware changes ──
+        if (source_) {
+            source_->set_center_freq(cfg_->center_hz());
+            source_->set_gains(cfg_->lna_gain, cfg_->vga_gain);
+            source_->set_amp(cfg_->amp);
+        }
+
+        std::printf("WebGUI: full config set (%zu bytes)\n", body.size());
+        std::fflush(stdout);
+
+        res.set_content("{\"ok\":true}", "application/json");
     });
 
     // ── /api/set POST → config ──
