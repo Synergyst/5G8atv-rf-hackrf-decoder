@@ -1,9 +1,38 @@
+# Build outputs
 build/
 build-*/
+
+# Third-party dependencies (vendored)
 third_party/
+
+# Generated test/artifact files
 *.cs8
 *.ppm
 *.bmp
 *.f32
-*.ini
+
+# IDE/editor files
+imgui.ini
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Recordings
+fpvdec_rec_*.cs8
+fpvdec_rec_overflow.cs8
+
+# Screenshots
+fpvdec_*.bmp
+
+# Output frame dumps
+out_0*.ppm
+
+# Core dumps
+core
+core.*
+
+# Executables that might end up in the tree
+fpvdec
+synth_fm
+*.exe
