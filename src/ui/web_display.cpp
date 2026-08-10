@@ -54,14 +54,27 @@ static std::string json_uint(const char* k, uint64_t v) {
     return std::string("  \"") + k + "\": " + std::to_string(v) + ",\n";
 }
 static std::string json_double(const char* k, double v) {
-    // Use %.3g to avoid trailing zeros while keeping precision.
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.3g", v);
+    // %g without limiting precision — avoids scientific notation on large
+    // values (e.g. 5865000000 would become 5.87e+09 with %.3g).
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "%.0f", v);
+    // Only append .0 for integer-valued doubles (carrier freq, sample rate),
+    // use %g for everything else.
+    char tmp[64];
+    std::snprintf(tmp, sizeof(tmp), "%.17g", v);
+    // Check if the %g form contains 'e'/'E' (scientific notation)
+    if (strchr(tmp, 'e') || strchr(tmp, 'E')) {
+        // It was large — use %.0f to avoid scientific notation
+        std::snprintf(buf, sizeof(buf), "%.0f", v);
+    } else {
+        // Small number — %g is fine
+        std::snprintf(buf, sizeof(buf), "%g", v);
+    }
     return std::string("  \"") + k + "\": " + buf + ",\n";
 }
 static std::string json_float(const char* k, float v) {
     char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.4g", v);
+    std::snprintf(buf, sizeof(buf), "%g", v);
     return std::string("  \"") + k + "\": " + buf + ",\n";
 }
 static std::string json_str(const char* k, const std::string& v) {
@@ -71,40 +84,42 @@ static std::string json_str(const char* k, const std::string& v) {
 }
 
 static std::string config_to_json(const Config& cfg) {
-    std::string j;
-    j += json_obj_start();
-    // RF
-    j += json_double("video_carrier_hz", cfg.video_carrier_hz);
-    j += json_double("sample_rate", cfg.sample_rate);
-    j += json_double("offset_hz", cfg.offset_hz);
-    j += json_int("lna_gain", cfg.lna_gain);
-    j += json_int("vga_gain", cfg.vga_gain);
-    j += json_bool("amp", cfg.amp);
-    j += json_bool("gain_auto", cfg.gain_auto);
-    // FM/Video
-    j += json_double("fm_dev_hz", cfg.fm_dev_hz);
-    j += json_bool("invert", cfg.invert);
-    j += json_bool("afc", cfg.afc);
-    j += json_double("video_lpf_hz", cfg.video_lpf_hz);
-    // Color
-    j += json_float("saturation", cfg.saturation);
-    j += json_float("hue_deg", cfg.hue_deg);
-    // Denoise
-    j += json_float("denoise", cfg.denoise);
-    j += json_float("denoise_temporal", cfg.denoise_temporal);
-    j += json_int("denoise_temporal_median", cfg.denoise_temporal_median);
-    j += json_float("denoise_temporal_median_strength", cfg.denoise_temporal_median_strength);
-    // Crop
-    j += json_float("overscan", cfg.overscan);
-    // Resolution
-    j += json_int("frame_width", cfg.frame_width);
-    j += json_int("frame_height", cfg.frame_height);
-    // Auto-detect
-    j += json_bool("auto_detect", cfg.auto_detect);
-    // GPSDO
-    j += json_bool("clkout", cfg.clkout);
-    j += json_bool("enforce_clkin", cfg.enforce_clkin);
-    j += json_obj_end();
+    std::vector<std::string> fields;
+    auto push = [&](std::string s) {
+        // Strip trailing comma+newline, add to vector
+        while (!s.empty() && (s.back() == '\n' || s.back() == ',' || s.back() == ' '))
+            s.pop_back();
+        if (!s.empty()) fields.push_back(s);
+    };
+    push(json_double("video_carrier_hz", cfg.video_carrier_hz));
+    push(json_double("sample_rate", cfg.sample_rate));
+    push(json_double("offset_hz", cfg.offset_hz));
+    push(json_int("lna_gain", cfg.lna_gain));
+    push(json_int("vga_gain", cfg.vga_gain));
+    push(json_bool("amp", cfg.amp));
+    push(json_bool("gain_auto", cfg.gain_auto));
+    push(json_double("fm_dev_hz", cfg.fm_dev_hz));
+    push(json_bool("invert", cfg.invert));
+    push(json_bool("afc", cfg.afc));
+    push(json_double("video_lpf_hz", cfg.video_lpf_hz));
+    push(json_float("saturation", cfg.saturation));
+    push(json_float("hue_deg", cfg.hue_deg));
+    push(json_float("denoise", cfg.denoise));
+    push(json_float("denoise_temporal", cfg.denoise_temporal));
+    push(json_int("denoise_temporal_median", cfg.denoise_temporal_median));
+    push(json_float("denoise_temporal_median_strength", cfg.denoise_temporal_median_strength));
+    push(json_float("overscan", cfg.overscan));
+    push(json_int("frame_width", cfg.frame_width));
+    push(json_int("frame_height", cfg.frame_height));
+    push(json_bool("auto_detect", cfg.auto_detect));
+    push(json_bool("clkout", cfg.clkout));
+    push(json_bool("enforce_clkin", cfg.enforce_clkin));
+
+    std::string j = "{\n";
+    for (size_t i = 0; i < fields.size(); ++i) {
+        j += "  " + fields[i] + (i + 1 < fields.size() ? "," : "") + "\n";
+    }
+    j += "}";
     return j;
 }
 
@@ -321,8 +336,111 @@ void WebDisplay::server_thread_func() {
         res.set_content(config_to_json(*cfg_), "application/json");
     });
 
+    // ── Minimal JSON parser ────────────────────────────────────────────────
+    // Recursive-descent parser for JSON objects. Returns {ok, errors, fields}.
+    // Only supports: object, string, number, boolean, null.
+    struct JsonField {
+        std::string key;
+        bool is_bool = false;
+        bool bool_val = false;
+        double num_val = 0.0;
+        std::string str_val;
+    };
+
+    auto parse_json = [&](const std::string& b) -> std::pair<bool, std::vector<JsonField>> {
+        bool ok = false;
+        std::vector<JsonField> fields;
+        std::string error;
+        size_t p = 0;
+        const char* src = b.c_str();
+        size_t len = b.size();
+
+        auto skip_ws = [&]() {
+            while (p < len && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' || src[p] == '\r')) ++p;
+        };
+
+        auto parse_string = [&](std::string& out) -> bool {
+            if (p >= len || src[p] != '"') { error = "Expected string"; return false; }
+            ++p; out.clear();
+            while (p < len) {
+                char c = src[p];
+                if (c == '"') { ++p; return true; }
+                if (c == '\\') {
+                    ++p;
+                    if (p < len) out += src[p];
+                    else { error = "Unterminated escape"; return false; }
+                } else out += c;
+                ++p;
+            }
+            error = "Unterminated string"; return false;
+        };
+
+        auto parse_number = [&](double& out) -> bool {
+            const char* start = src + p;
+            char* end;
+            out = std::strtod(start, &end);
+            if (end == start) { error = "Bad number"; return false; }
+            p = end - src;
+            return true;
+        };
+
+        auto parse_value = [&]() -> std::optional<JsonField> {
+            skip_ws();
+            if (p >= len) { error = "Unexpected end"; return std::nullopt; }
+            JsonField f;
+            char c = src[p];
+            if (c == '"') {
+                if (!parse_string(f.str_val)) return std::nullopt;
+            } else if (c == 't') {
+                if (p + 4 > len || b.substr(p, 4) != "true") { error = "Expected 'true'"; return std::nullopt; }
+                p += 4; f.is_bool = true; f.bool_val = true;
+            } else if (c == 'f') {
+                if (p + 5 > len || b.substr(p, 5) != "false") { error = "Expected 'false'"; return std::nullopt; }
+                p += 5; f.is_bool = true; f.bool_val = false;
+            } else if (c == 'n') {
+                if (p + 4 > len || b.substr(p, 4) != "null") { error = "Expected 'null'"; return std::nullopt; }
+                p += 4;
+            } else if (c == '-' || (c >= '0' && c <= '9')) {
+                if (!parse_number(f.num_val)) return std::nullopt;
+            } else { error = std::string("Unexpected '") + c + "'"; return std::nullopt; }
+            return f;
+        };
+
+        // Parse object: { key: value, ... }
+        skip_ws();
+        if (p >= len || src[p] != '{') { error = "Expected '{' at start"; return {false, {}}; }
+        ++p;
+        skip_ws();
+        while (p < len) {
+            if (src[p] == '}') { ok = true; return {true, fields}; }
+            if (src[p] == ',') { ++p; skip_ws(); continue; }
+            // Parse key
+            skip_ws();
+            if (p >= len) { error = "Unexpected end in object"; return {false, {}}; }
+            JsonField key;
+            if (!parse_string(key.str_val)) return {false, {}};
+            // Expect colon
+            skip_ws();
+            if (p >= len || src[p] != ':') { error = "Expected ':' after key '" + key.str_val + "'"; return {false, {}}; }
+            ++p;
+            // Parse value
+            auto val = parse_value();
+            if (!val) return {false, {}};
+            key.key = key.str_val;
+            if (val->is_bool) {
+                key.bool_val = val->bool_val;
+            } else {
+                key.num_val = val->num_val;
+            }
+            fields.push_back(key);
+            skip_ws();
+        }
+        error = "Unexpected end in object";
+        return {false, {}};
+    };
+
     // ── /api/config/set → apply full or partial Config JSON ──
-    svr.Post("/api/config/set", [this](const httplib::Request& req, httplib::Response& res) {
+    svr.Post("/api/config/set", [this, parse_json = std::move(parse_json)](const httplib::Request& req, httplib::Response& res) {
         if (!cfg_) {
             res.set_content("{\"ok\":false,\"error\":\"no config\"}", "application/json");
             res.status = 503;
@@ -334,115 +452,142 @@ void WebDisplay::server_thread_func() {
             res.status = 400;
             return;
         }
-        // Minimal JSON field extractor: parse key:value pairs from body.
-        // Supports integers, floats, booleans, strings.
-        auto extract_json_field = [&](const std::string& name) -> std::optional<std::string> {
-            // Look for "name": value patterns
-            std::string search = std::string("\"") + name + std::string("\"");
-            auto pos = body.find(search);
-            if (pos == std::string::npos) return std::nullopt;
-            pos += search.size();
-            // Skip whitespace and colon
-            while (pos < body.size() && (body[pos] == ' ' || body[pos] == ':' || body[pos] == '\t')) ++pos;
-            if (pos >= body.size()) return std::nullopt;
-            std::string val;
-            if (body[pos] == '"') {
-                // String value
-                ++pos;
-                while (pos < body.size() && body[pos] != '"') {
-                    if (body[pos] == '\\' && pos + 1 < body.size()) {
-                        val += body[pos + 1];
-                        ++pos;
-                    } else {
-                        val += body[pos];
-                    }
-                    ++pos;
-                }
-            } else {
-                // Numeric or boolean value — read until comma, brace, or newline
-                while (pos < body.size() && body[pos] != ',' && body[pos] != '}' && body[pos] != '\n') {
-                    val += body[pos];
-                    ++pos;
-                }
-            }
-            return val;
+
+        auto [ok, fields] = parse_json(body);
+        if (!ok) {
+            std::string resp = "{\"ok\":false,\"error\":\"Parse error\"}";
+            res.set_content(resp, "application/json");
+            res.status = 400;
+            return;
+        }
+
+        // Find field by key name (exact match, no substring ambiguity).
+        auto find_field = [&](const std::string& key) -> const JsonField* {
+            for (auto& f : fields) if (f.key == key) return &f;
+            return nullptr;
         };
 
-        // ── Boolean fields ──
-        auto set_bool = [&](const std::string& name, bool& target) {
-            auto v = extract_json_field(name);
-            if (v && (*v == "true" || *v == "1")) target = true;
-            else if (v && (*v == "false" || *v == "0")) target = false;
+        auto get_bool_field = [&](const std::string& key) -> std::optional<bool> {
+            auto* f = find_field(key);
+            if (f && f->is_bool) return f->bool_val;
+            return std::nullopt;
         };
-        set_bool("afc", cfg_->afc);
-        set_bool("invert", cfg_->invert);
-        set_bool("gain_auto", cfg_->gain_auto);
-        set_bool("amp", cfg_->amp);
-        set_bool("auto_detect", cfg_->auto_detect);
-        set_bool("clkout", cfg_->clkout);
-        set_bool("enforce_clkin", cfg_->enforce_clkin);
-
-        // ── Integer fields ──
-        auto set_int = [&](const std::string& name, int& target) {
-            auto v = extract_json_field(name);
-            if (v) {
-                int val = std::atoi(v->c_str());
-                if (name == "lna_gain") cfg_->lna_gain = std::clamp((val / 8) * 8, 0, 40);
-                else if (name == "vga_gain") cfg_->vga_gain = std::clamp((val / 2) * 2, 0, 62);
-                else if (name == "denoise_temporal_median") {
-                    int n = std::clamp(val, 3, 9);
-                    if (n % 2 == 0) ++n;
-                    cfg_->denoise_temporal_median = n;
-                }
-                else if (name == "frame_width") cfg_->frame_width = std::max(1, val);
-                else if (name == "frame_height") cfg_->frame_height = std::max(1, val);
-                else cfg_->frame_width = val; // fallback
-            }
+        auto get_num_field = [&](const std::string& key) -> std::optional<double> {
+            auto* f = find_field(key);
+            if (f && !f->is_bool) return f->num_val;
+            return std::nullopt;
         };
-        set_int("lna_gain", cfg_->lna_gain);
-        set_int("vga_gain", cfg_->vga_gain);
-        set_int("denoise_temporal_median", cfg_->denoise_temporal_median);
-        set_int("frame_width", cfg_->frame_width);
-        set_int("frame_height", cfg_->frame_height);
 
-        // ── Double fields ──
-        auto set_double = [&](const std::string& name, double& target) {
-            auto v = extract_json_field(name);
-            if (v) target = std::atof(v->c_str());
+        bool any_change = false;
+
+        if (auto v = get_bool_field("afc")) { cfg_->afc = *v; any_change = true; std::printf("WebGUI: afc=%s\n", *v ? "true" : "false"); }
+        if (auto v = get_bool_field("invert")) { cfg_->invert = *v; any_change = true; std::printf("WebGUI: invert=%s\n", *v ? "true" : "false"); }
+        if (auto v = get_bool_field("gain_auto")) { cfg_->gain_auto = *v; any_change = true; std::printf("WebGUI: gain_auto=%s\n", *v ? "true" : "false"); }
+        if (auto v = get_bool_field("amp")) { cfg_->amp = *v; any_change = true; std::printf("WebGUI: amp=%s\n", *v ? "true" : "false"); }
+        if (auto v = get_bool_field("auto_detect")) { cfg_->auto_detect = *v; any_change = true; std::printf("WebGUI: auto_detect=%s\n", *v ? "true" : "false"); }
+        if (auto v = get_bool_field("clkout")) { cfg_->clkout = *v; any_change = true; std::printf("WebGUI: clkout=%s\n", *v ? "true" : "false"); }
+        if (auto v = get_bool_field("enforce_clkin")) { cfg_->enforce_clkin = *v; any_change = true; std::printf("WebGUI: enforce_clkin=%s\n", *v ? "true" : "false"); }
+
+        auto apply_int = [&](const std::string& key, auto clamp_fn) {
+            auto v = get_num_field(key);
+            if (v) { cfg_->lna_gain = clamp_fn(static_cast<int>(v.value())); any_change = true; std::printf("WebGUI: %s=%d\n", key.c_str(), cfg_->lna_gain); }
         };
-        set_double("video_carrier_hz", cfg_->video_carrier_hz);
-        set_double("offset_hz", cfg_->offset_hz);
-        set_double("sample_rate", cfg_->sample_rate);
-        set_double("fm_dev_hz", cfg_->fm_dev_hz);
-        set_double("video_lpf_hz", cfg_->video_lpf_hz);
 
-        // ── Float fields ──
-        auto set_float = [&](const std::string& name, float& target) {
-            auto v = extract_json_field(name);
-            if (v) target = static_cast<float>(std::atof(v->c_str()));
-        };
-        set_float("saturation", cfg_->saturation);
-        set_float("hue_deg", cfg_->hue_deg);
-        set_float("denoise", cfg_->denoise);
-        set_float("denoise_temporal", cfg_->denoise_temporal);
-        set_float("denoise_temporal_median_strength", cfg_->denoise_temporal_median_strength);
-        set_float("overscan", cfg_->overscan);
+        // LNA: 0-40, step 8
+        if (auto v = get_num_field("lna_gain")) {
+            cfg_->lna_gain = std::clamp((static_cast<int>(v.value()) / 8) * 8, 0, 40);
+            any_change = true;
+            std::printf("WebGUI: lna_gain=%d (raw=%.0f)\n", cfg_->lna_gain, v.value());
+        }
+        // VGA: 0-62, step 2
+        if (auto v = get_num_field("vga_gain")) {
+            cfg_->vga_gain = std::clamp((static_cast<int>(v.value()) / 2) * 2, 0, 62);
+            any_change = true;
+            std::printf("WebGUI: vga_gain=%d (raw=%.0f)\n", cfg_->vga_gain, v.value());
+        }
+        // Denoise median: 0=off, or 3/5/7/9
+        if (auto v = get_num_field("denoise_temporal_median")) {
+            int n = static_cast<int>(v.value());
+            if (n <= 0) n = 0;
+            else { if (n % 2 == 0) ++n; n = std::clamp(n, 3, 9); }
+            cfg_->denoise_temporal_median = n;
+            any_change = true;
+            std::printf("WebGUI: denoise_temporal_median=%d (raw=%.0f)\n", n, v.value());
+        }
+        // Frame width: 320-1920
+        if (auto v = get_num_field("frame_width")) {
+            cfg_->frame_width = std::clamp(static_cast<int>(v.value()), 320, 1920);
+            any_change = true;
+            std::printf("WebGUI: frame_width=%d (raw=%.0f)\n", cfg_->frame_width, v.value());
+        }
+        // Frame height: 240-1080
+        if (auto v = get_num_field("frame_height")) {
+            cfg_->frame_height = std::clamp(static_cast<int>(v.value()), 240, 1080);
+            any_change = true;
+            std::printf("WebGUI: frame_height=%d (raw=%.0f)\n", cfg_->frame_height, v.value());
+        }
 
-        // Clamp floats
-        cfg_->saturation = std::clamp(cfg_->saturation, 0.0f, 2.0f);
-        cfg_->denoise = std::clamp(cfg_->denoise, 0.0f, 1.0f);
-        cfg_->denoise_temporal = std::clamp(cfg_->denoise_temporal, 0.0f, 1.0f);
-        cfg_->denoise_temporal_median_strength = std::clamp(cfg_->denoise_temporal_median_strength, 0.0f, 1.0f);
-        cfg_->overscan = std::clamp(cfg_->overscan, 0.0f, 0.15f);
+        // Double fields
+        if (auto v = get_num_field("video_carrier_hz")) {
+            cfg_->video_carrier_hz = std::clamp(v.value(), 5.6e9, 6.0e9);
+            any_change = true;
+            std::printf("WebGUI: video_carrier_hz=%.3f MHz (raw=%.0f)\n", cfg_->video_carrier_hz / 1e6, v.value());
+        }
+        if (auto v = get_num_field("offset_hz")) {
+            cfg_->offset_hz = std::clamp(v.value(), -2e6, 2e6);
+            any_change = true;
+            std::printf("WebGUI: offset_hz=%.0f Hz (raw=%.0f)\n", cfg_->offset_hz, v.value());
+        }
+        if (auto v = get_num_field("sample_rate")) {
+            cfg_->sample_rate = std::clamp(v.value(), 6e6, 20e6);
+            any_change = true;
+            std::printf("WebGUI: sample_rate=%.1f MSPS (raw=%.0f)\n", cfg_->sample_rate / 1e6, v.value());
+        }
+        if (auto v = get_num_field("fm_dev_hz")) {
+            cfg_->fm_dev_hz = std::clamp(v.value(), 1e6, 10e6);
+            any_change = true;
+            std::printf("WebGUI: fm_dev_hz=%.1f MHz (raw=%.0f)\n", cfg_->fm_dev_hz / 1e6, v.value());
+        }
+        if (auto v = get_num_field("video_lpf_hz")) {
+            cfg_->video_lpf_hz = std::clamp(v.value(), 0.0, 6e6);
+            any_change = true;
+            std::printf("WebGUI: video_lpf_hz=%.1f MHz (raw=%.0f)\n", cfg_->video_lpf_hz / 1e6, v.value());
+        }
 
-        // ── Apply hardware changes ──
-        if (source_) {
+        // Float fields
+        if (auto v = get_num_field("saturation")) {
+            float f = static_cast<float>(v.value()); cfg_->saturation = std::clamp(f, 0.0f, 2.0f); any_change = true;
+            std::printf("WebGUI: saturation=%.2f (raw=%.4g)\n", cfg_->saturation, v.value());
+        }
+        if (auto v = get_num_field("hue_deg")) {
+            float f = static_cast<float>(v.value()); cfg_->hue_deg = std::clamp(f, -180.0f, 180.0f); any_change = true;
+            std::printf("WebGUI: hue_deg=%.1f (raw=%.4g)\n", cfg_->hue_deg, v.value());
+        }
+        if (auto v = get_num_field("denoise")) {
+            float f = static_cast<float>(v.value()); cfg_->denoise = std::clamp(f, 0.0f, 1.0f); any_change = true;
+            std::printf("WebGUI: denoise=%.2f (raw=%.4g)\n", cfg_->denoise, v.value());
+        }
+        if (auto v = get_num_field("denoise_temporal")) {
+            float f = static_cast<float>(v.value()); cfg_->denoise_temporal = std::clamp(f, 0.0f, 1.0f); any_change = true;
+            std::printf("WebGUI: denoise_temporal=%.2f (raw=%.4g)\n", cfg_->denoise_temporal, v.value());
+        }
+        if (auto v = get_num_field("denoise_temporal_median_strength")) {
+            float f = static_cast<float>(v.value()); cfg_->denoise_temporal_median_strength = std::clamp(f, 0.0f, 1.0f); any_change = true;
+            std::printf("WebGUI: denoise_temporal_median_strength=%.2f (raw=%.4g)\n", cfg_->denoise_temporal_median_strength, v.value());
+        }
+        if (auto v = get_num_field("overscan")) {
+            float f = static_cast<float>(v.value()); cfg_->overscan = std::clamp(f, 0.0f, 0.15f); any_change = true;
+            std::printf("WebGUI: overscan=%.2f (raw=%.4g)\n", cfg_->overscan, v.value());
+        }
+
+        // Apply hardware changes
+        if (any_change && source_) {
             source_->set_center_freq(cfg_->center_hz());
             source_->set_gains(cfg_->lna_gain, cfg_->vga_gain);
             source_->set_amp(cfg_->amp);
         }
 
-        std::printf("WebGUI: full config set (%zu bytes)\n", body.size());
+        std::printf("WebGUI: config set (changed=%d, body=%zu bytes)\n", any_change, body.size());
         std::fflush(stdout);
 
         res.set_content("{\"ok\":true}", "application/json");

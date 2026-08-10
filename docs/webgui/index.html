@@ -411,7 +411,7 @@
           </div>
           <div class="slider-row">
             <label>Temporal Median</label>
-            <input type="range" id="denoise-med" min="0" max="9" step="2" value="0">
+            <input type="range" id="denoise-med" min="0" max="9" step="1" value="0">
             <span class="val" id="denoise-med-val">Off</span>
           </div>
           <div class="slider-row">
@@ -506,15 +506,16 @@
 
     function sendConfigBatch() {
       if (Object.keys(pendingConfig).length === 0) return;
+      const obj = pendingConfig;
+      pendingConfig = {};
       fetch(`${BASE}/api/config/set`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(pendingConfig)
-      }).catch(err => {
+        body: JSON.stringify(obj)
+      }).then(() => fetchConfig()).catch(err => {
         console.error('Config send failed:', err);
         showToast('Config send failed');
       });
-      pendingConfig = {};
       debounceTimer = null;
     }
 
@@ -895,8 +896,7 @@
       }
       poll();
 
-      // Config poll every 1s
-      setInterval(fetchConfig, 1000);
+
     }
 
     // ── Section collapse/expand ────────────────────────────────────────────
