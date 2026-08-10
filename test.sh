@@ -3,8 +3,10 @@ set -e
 
 cd /home/dragonos/Sources/5G8atv-rf-hackrf-decoder
 
-# Build
-if [ -n "$1" ]; then
+# Build (normal + WebGUI)
+if [ -n "$1" ] && [ "$1" = "webgui" ]; then
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DWEBGUI=ON && cmake --build build -j4
+elif [ -n "$1" ] && [ "$1" = "soapysdr" ]; then
     cmake -B build -DCMAKE_BUILD_TYPE=Release -DSOAPYSDR=ON && cmake --build build -j4
 else
     cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j

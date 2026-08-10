@@ -427,7 +427,38 @@ Runs the DSP pipeline without SDL/ImGui, prints periodic stats. Ctrl+C or `--deb
 
 ---
 
-## 9. Code Style Notes
+## 8. Web GUI Mode
+
+Build with `WEBGUI=ON` to enable a headless HTTP server with a browser-based
+control panel. Useful for headless server deployments and remote monitoring.
+
+```bash
+cmake -B build -DWEBGUI=ON
+cmake --build build -j
+
+# Start web server (default port 8080)
+./build/fpvdec --gui web
+
+# Custom port
+./build/fpvdec --gui web --web-port 9090
+
+# Full headless pipeline with web UI
+./build/fpvdec --gui web --input file --file bars.cs8 --denoise 0.5
+```
+
+**API endpoints:**
+- `GET /` — Browser UI with video canvas and controls
+- `GET /api/frame` — Latest decoded frame as JPEG
+- `GET /api/stats` — Decoder stats as JSON (sync, fps, AGC, clipping)
+- `POST /api/set` — Apply config changes via form data
+
+**Files:**
+- `src/ui/web_display.{hpp,cpp}` — HTTP server using cpp-httplib + libjpeg-turbo
+- `docs/webgui/index.html` — Browser UI template
+
+---
+
+## 10. Code Style Notes
 
 - **Namespace:** Everything lives in `namespace famidec { ... }`
 - **Include guards:** `#pragma once` is used throughout
@@ -440,7 +471,7 @@ Runs the DSP pipeline without SDL/ImGui, prints periodic stats. Ctrl+C or `--deb
 
 ---
 
-## 10. File Index (Quick Reference)
+## 11. File Index (Quick Reference)
 
 | File | Responsibility |
 |---|---|
@@ -465,7 +496,7 @@ Runs the DSP pipeline without SDL/ImGui, prints periodic stats. Ctrl+C or `--deb
 
 ---
 
-## 11. Auto-Detection Reference
+## 12. Auto-Detection Reference
 
 When `--auto-res` is enabled, the decoder populates these stats after lock:
 
@@ -491,10 +522,12 @@ pixels of actual signal information.
 
 ---
 
-## 12. Version History
+## 13. Version History
 
 | Date | Commit | Summary |
 |---|---|---|
+| 2026-08-09 | a759b2c | Add Web GUI mode for headless/server deployment |
+| 2026-08-09 | 42da9ec | Update .gitignore and fix test.sh |
 | 2026-08-09 | 8e5b911 | Update .gitignore, add test.sh with full test suite |
 | 2026-08-09 | 91d2529 | Enhance synth_fm: configurable params, --help dialog |
 | 2026-08-09 | b2746f4 | Fix synth_fm segfault: add TripleBuffer resize |

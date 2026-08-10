@@ -137,6 +137,35 @@ Restores the original behavior with legacy keyboard hotkeys:
 The SDL overlay renders a big green channel readout (top-left), a yellow
 status line across the top, and a red `CLIP` indicator on ADC clipping.
 
+### Web Mode (`--gui web`, requires `-DWEBGUI=ON`)
+
+A headless HTTP server that serves a browser-based control panel.
+Connect to `http://localhost:8080/` to see the video and controls.
+No SDL/Display/OpenGL required — runs on headless servers.
+
+| Endpoint | Description |
+|---|---|
+| `/` | Browser UI (video canvas, stats panel, controls) |
+| `/api/frame` | Latest decoded frame as JPEG |
+| `/api/stats` | Decoder stats as JSON (sync, fps, AGC, clipping) |
+| `/api/set` | POST form data to change config (key/value pairs) |
+
+```sh
+cmake -B build -DWEBGUI=ON
+cmake --build build
+
+./build/fpvdec --gui web              # server on port 8080
+./build/fpvdec --gui web --web-port 9090  # custom port
+```
+
+**Features:**
+- Real-time video streaming as JPEG (adjust quality vs. bandwidth)
+- Live decoder stats overlay (sync status, FPS, AGC, clipping, latency)
+- Control panel for channel selection, gain (LNA/VGA), RF amp toggle
+- All existing flags work: `--denoise`, `--auto-res`, `--record`, etc.
+- AFC and AGC operate normally (same as SDL mode)
+- Ctrl+C to stop the server
+
 ## Hardware
 
 ### Native HackRF One
