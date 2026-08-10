@@ -400,6 +400,33 @@ modifying the SDL overlay only touches `sdl_display`.
 ctest --test-dir build -C Release
 ```
 
+### synth_fm options
+
+| Option | Description |
+|---|---|
+| `--fields N` | Number of NTSC fields (default 30) |
+| `--repeat N` | Run test N times for stress testing (default 1) |
+| `--check-frames` | Check ALL decoded frames, not just the last |
+| `--rate HZ` | Sample rate (default 10e6) |
+| `--dev HZ` | FM deviation (default 2.5e6) |
+| `--width W` | Output frame width (default 640) |
+| `--height H` | Output frame height (default 480) |
+| `--help` | Show usage dialog |
+
+Examples:
+```sh
+./build/synth_fm --fields 60 --repeat 3   # stress test
+./build/synth_fm --check-frames           # verify every frame
+./build/synth_fm --fields 100 bars.cs8    # generate IQ for replay
+```
+
+### Full test suite
+
+```sh
+./test.sh                    # build + golden test + long-run test + replay
+./test.sh soapysdr           # build with SoapySDR support
+```
+
 ## Troubleshooting
 
 | Symptom | Fix |

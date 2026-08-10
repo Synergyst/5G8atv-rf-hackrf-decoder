@@ -375,7 +375,59 @@ ctest --test-dir build -C Release
 
 ---
 
-## 7. Code Style Notes
+## 7. Testing
+
+### Automated test
+
+```
+ctest --test-dir build -C Release
+```
+
+Runs the synth_fm golden test: generates synthetic FM-ATV NTSC color-bar IQ,
+runs it through the full DSP chain, asserts RGB output matches expected bars.
+
+### synth_fm options
+
+| Option | Description |
+|---|---|
+| `--fields N` | Number of NTSC fields (default 30) |
+| `--repeat N` | Run test N times (default 1, for stress testing) |
+| `--check-frames` | Check ALL decoded frames, not just the last |
+| `--rate HZ` | Sample rate (default 10e6) |
+| `--dev HZ` | FM deviation (default 2.5e6) |
+| `--width W` | Output frame width (default 640) |
+| `--height H` | Output frame height (default 480) |
+| `--help` | Show usage dialog |
+| `output.cs8` | Write synthetic IQ to file (exits, no test) |
+
+Stress testing examples:
+```
+./build/synth_fm --fields 1200 --check-frames   # long-run, verify all frames
+./build/synth_fm --fields 60 --repeat 5          # 5 iterations
+./build/synth_fm --rate 8e6 --dev 5e6            # test with different params
+```
+
+### Full test suite
+
+```
+./test.sh                    # build + golden test + long-run test + replay
+./test.sh soapysdr           # build with SoapySDR support
+```
+
+Sequence: cmake build → synth_fm (30 fields) → synth_fm --fields 1200 --check-frames → synth_fm --fields 1200 bars.cs8 → fpvdec replay.
+
+### Debug mode for source testing
+
+```
+./build/fpvdec --source hackrf --debug --debug-duration 30
+./build/fpvdec --source soapysdr --device "driver=uhd" --debug --channel R1
+```
+
+Runs the DSP pipeline without SDL/ImGui, prints periodic stats. Ctrl+C or `--debug-duration N` to exit.
+
+---
+
+## 9. Code Style Notes
 
 - **Namespace:** Everything lives in `namespace famidec { ... }`
 - **Include guards:** `#pragma once` is used throughout
@@ -388,7 +440,7 @@ ctest --test-dir build -C Release
 
 ---
 
-## 8. File Index (Quick Reference)
+## 10. File Index (Quick Reference)
 
 | File | Responsibility |
 |---|---|
@@ -413,7 +465,7 @@ ctest --test-dir build -C Release
 
 ---
 
-## 9. Auto-Detection Reference
+## 11. Auto-Detection Reference
 
 When `--auto-res` is enabled, the decoder populates these stats after lock:
 
@@ -439,10 +491,15 @@ pixels of actual signal information.
 
 ---
 
-## 10. Version History
+## 12. Version History
 
 | Date | Commit | Summary |
 |---|---|---|
+| 2026-08-09 | 8e5b911 | Update .gitignore, add test.sh with full test suite |
+| 2026-08-09 | 91d2529 | Enhance synth_fm: configurable params, --help dialog |
+| 2026-08-09 | b2746f4 | Fix synth_fm segfault: add TripleBuffer resize |
+| 2026-08-09 | ce64460 | Fix auto-res hang and double-resize bugs |
+| 2026-08-09 | 04f48c4 | Add debug mode (--debug) for running DSP without GUI |
 | 2025-08-08 | 7d736f6 | Configurable resolution + auto-detection |
 | 2025-08-08 | ecae62c | Overlay section visibility toggles |
 | 2025-08-08 | efdf295 | Transparent overlay refactoring |
