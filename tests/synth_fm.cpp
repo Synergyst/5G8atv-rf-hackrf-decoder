@@ -114,6 +114,7 @@ int main(int argc, char** argv) {
 
     // Same chain as the live FM pipeline (default: no post-detector LPF).
     TripleBuffer tb;
+    tb.resize(cfg.frame_width, cfg.frame_height);  // must resize before decoder
     NtscDecoder dec(cfg, tb);
     DcBlocker dcb;
     FirFilterC chan_lpf(design_lowpass(std::min(8.0e6, kFs * 0.49), kFs, 47));
