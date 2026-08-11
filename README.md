@@ -1,10 +1,12 @@
-# 5G8atv-rf-hackrf-decoder (fpvdec)
+# Analog FPV Video Decoder (fpvdec)
 
 [日本語 README はこちら](README.ja.md)
 
-A software receiver for **5.8 GHz analog FPV video (FM-ATV, NTSC)** using a
-HackRF One — real-time color decoding of drone VTX signals on your PC.
-C++20 + libhackrf + SDL2 + Dear ImGui, no GNU Radio required.
+A hardware-independent software receiver for **5.8 GHz analog FPV video
+(FM-ATV, NTSC)** — real-time color decoding of drone VTX signals on your PC.
+Supports native HackRF, native UHD devices such as the LibreSDR B220mini / Ettus
+B210, and SoapySDR-compatible radios. C++20 + SDL2 + Dear ImGui, no GNU Radio
+required.
 
 Forked from
 [GOROman/famicom-rf-hackrf-decoder](https://github.com/GOROman/famicom-rf-hackrf-decoder)
@@ -16,7 +18,8 @@ Demo video (click to watch on YouTube):
 [![Demo video](https://img.youtube.com/vi/dDNk-uRtcGw/maxresdefault.jpg)](https://www.youtube.com/watch?v=dDNk-uRtcGw)
 
 Live decode of a real 25 mW whoop VTX — HackRF One on the left, fpvdec
-running on the laptop (Betaflight OSD visible):
+running on the laptop (Betaflight OSD visible). HackRF is one supported input;
+native UHD and SoapySDR backends are also available:
 
 ![Setup: HackRF One + whoop + fpvdec live decode](docs/IMG_9715.jpeg)
 
@@ -486,7 +489,7 @@ The decoder reports CLKIN lock status in the overlay ("CLKIN: LOCKED" or "CLKIN:
 ## How it works
 
 ```
-HackRF / UHD / SoapySDR source
+HackRF / UHD / SoapySDR / File source
   → CS8 or CS16 normalization to complex float
   → complex DC blocker
   → 4.9 MHz complex channel LPF (flat through the chroma upper sideband)

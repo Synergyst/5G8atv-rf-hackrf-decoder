@@ -1,4 +1,4 @@
-# fpvdec Development Reference Manual
+# Analog FPV Video Decoder (fpvdec) Development Reference Manual
 
 A quick-reference guide for understanding the codebase structure, conventions,
 and common pitfalls. Written from accumulated experience modifying this code.
@@ -32,8 +32,10 @@ src/
 │   ├── temporal_median.hpp ← N-frame temporal median on Y channel
 │   └── temporal_median.cpp ← TemporalMedian auto-registration
 ├── source/
-│   ├── sample_source.hpp ← Abstract input interface
-│   ├── hackrf_source.cpp ← HackRF One input
+│   ├── sample_source.hpp ← Pull-based source interface + CS8/CS16 format
+│   ├── hackrf_source.cpp ← Native HackRF CS8 input
+│   ├── uhd_source.cpp    ← Native UHD CS8/CS16 input
+│   ├── soapy_source.cpp  ← SoapySDR CS8/CS16 input
 │   └── file_source.cpp   ← .cs8 recording replay
 ├── ui/
 │   ├── sdl_display.cpp   ← SDL2 window/renderer, CRT LUT, OSD text
@@ -56,7 +58,7 @@ third_party/              ← External dependencies (SDL2, etc.)
 ```
 main.cpp
   ├── Config (config.hpp)
-  ├── ISampleSource → HackRfSource / FileSource
+  ├── ISampleSource → HackRfSource / UhdSource / SoapySource / FileSource
   ├── NtscDecoder (dsp/ntsc_decoder.cpp)
   ├── TripleBuffer (dsp/frame.hpp)
   ├── FilterPipeline (filter/filter.cpp)
@@ -71,7 +73,8 @@ main.cpp
 ### Data flow (DSP thread):
 
 ```
-HackRF / File → complex IQ → DC blocker → channel LPF → FM discriminator
+HackRF / UHD / SoapySDR / File → CS8 or CS16 IQ → normalized complex float
+  → DC blocker → channel LPF → FM discriminator
   → AGC → sync separator → flywheel PLL → chroma BPF → U/V demod → RGB Frame
   → publish to TripleBuffer
 ```
@@ -412,6 +415,8 @@ Stress testing examples:
 ```
 ./test.sh                    # build + golden test + long-run test + replay
 ./test.sh soapysdr           # build with SoapySDR support
+./test.sh uhd                # build with native UHD support
+./test.sh all                # build with SoapySDR + UHD + Web GUI
 ```
 
 Sequence: cmake build → synth_fm (30 fields) → synth_fm --fields 1200 --check-frames → synth_fm --fields 1200 bars.cs8 → fpvdec replay.
@@ -538,7 +543,8 @@ interpreted as `.cs8`.
 - **Include guards:** `#pragma once` is used throughout
 - **Forward declarations:** Prefer forward declarations over full includes where possible
 - **Thread safety:** `NtscDecoder` is single-producer; `TripleBuffer` is lock-free;
-  `Config` is read-only after construction (no mutex needed)
+  source workers communicate through SPSC rings; runtime configuration changes
+  must be coordinated through the configuration event path
 - **AVX2:** DSP hot paths use AVX2 intrinsics; check `dsp/` for vectorized kernels
 - **Comments:** Technical comments explain *why*, not *what*. The code is dense and
   assumes familiarity with NTSC composite video theory.
@@ -562,11 +568,11 @@ interpreted as `.cs8`.
 | `fir.hpp` | FIR filter design and processing utilities |
 | `fm_detector.hpp` | FM quadrature discriminator |
 | `sync.hpp` | Sync separator + flywheel PLL for line timing |
-| `hackrf_source.cpp` | HackRF One input (10 MSPS, AFC, gain control) |
-| `uhd_source.cpp/.hpp` | Native UHD `sc16` input converted to signed 8-bit IQ |
-| `soapy_source.cpp/.hpp` | SoapySDR `CS16` input converted to signed 8-bit IQ |
-| `file_source.cpp` | .cs8 recording replay input |
-| `sample_source.hpp` | Common pull-based source/HAL interface |
+| `hackrf_source.cpp` | Native HackRF CS8 input (10 MSPS, AFC, gain control) |
+| `uhd_source.cpp/.hpp` | Native UHD `sc16` input, delivered as CS8 or CS16 |
+| `soapy_source.cpp/.hpp` | SoapySDR `CS16` input, delivered as CS8 or CS16 |
+| `sample_source.hpp` | Source lifecycle, hardware hooks, and `SampleFormat` |
+| `file_source.cpp` | `.cs8` signed interleaved 8-bit replay input |
 | `synth_fm.cpp` | E2E test: generates synthetic IQ, decodes, asserts RGB |
 | `fpv_channels.hpp` | 40 standard 5.8 GHz FPV channel frequencies |
 | `spectrum.hpp` | PSD (power spectral density) printing utility |
@@ -603,6 +609,8 @@ pixels of actual signal information.
 
 | Date | Commit | Summary |
 |---|---|---|
+| 2026-08-11 | c5d8e9c | Add CS8/CS16 DSP input support and update documentation |
+| 2026-08-11 | 66c717a | Add native UHD and repair SoapySDR sources |
 | 2026-08-09 | a759b2c | Add Web GUI mode for headless/server deployment |
 | 2026-08-09 | 42da9ec | Update .gitignore and fix test.sh |
 | 2026-08-09 | 8e5b911 | Update .gitignore, add test.sh with full test suite |

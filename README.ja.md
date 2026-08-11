@@ -1,10 +1,11 @@
-# 5G8atv-rf-hackrf-decoder (fpvdec)
+# Analog FPV Video Decoder (fpvdec)
 
 [English README is here](README.md)
 
-HackRF One で **5.8GHz帯アナログFPV映像(FM-ATV、NTSC)** を受信し、PC上で
-リアルタイムにカラーデコードするソフトウェア受信機です。C++20 +
-libhackrf + SDL2。GNU Radio 不要。
+**5.8GHz帯アナログFPV映像(FM-ATV、NTSC)** を受信し、PC上でリアルタイムに
+カラーデコードするハードウェア非依存のソフトウェア受信機です。C++20 +
+SDL2 + Dear ImGui。GNU Radio は不要です。ネイティブ HackRF、UHD 対応
+デバイス(LibreSDR B220mini / Ettus B210 など)、SoapySDR に対応します。
 
 [GOROman/famicom-rf-hackrf-decoder](https://github.com/GOROman/famicom-rf-hackrf-decoder)
 (ファミコンVHF RFデコーダ)からのフォークで、NTSCデコーダ部を継承し、
@@ -14,7 +15,7 @@ RFフロントエンドを FM-ATV 用に作り直したものです。
 
 [![デモ動画](https://img.youtube.com/vi/dDNk-uRtcGw/maxresdefault.jpg)](https://www.youtube.com/watch?v=dDNk-uRtcGw)
 
-実機 25mW Whoop VTX のライブデコード — 左が HackRF One、ノートPC 上で
+実機 25mW Whoop VTX のライブデコード例 — HackRF One を使い、ノートPC 上で
 fpvdec が動作中(Betaflight OSD が見えます):
 
 ![セットアップ: HackRF One + Whoop + fpvdec ライブデコード](docs/IMG_9715.jpeg)
@@ -38,12 +39,27 @@ fpvdec が動作中(Betaflight OSD が見えます):
 
 ## ハードウェア
 
-[HackRF One](https://greatscottgadgets.com/hackrf/one/) を受信専用・
-10MSPS で使用します。付属ホイップアンテナは机上距離なら動作しますが、
+[HackRF One](https://greatscottgadgets.com/hackrf/one/)、UHD 対応 SDR、または
+SoapySDR 対応 SDR を受信専用で使用します。HackRF は CS8、UHD/SoapySDR は
+`--bits 8|16` で入力形式を選択できます。付属ホイップアンテナは机上距離なら動作しますが、
 距離を出すには **5.8GHz 円偏波パッチ/ヘリカルアンテナ**を推奨します
 (FPV VTX は円偏波のため、直線偏波ホイップは常時 -3dB + 深いマルチパス
 フェードを受けます)。+14dB RF アンプはデフォルト ON です
 (`--no-amp` で無効)。
+
+## 対応バックエンドとサンプル形式
+
+ネイティブ HackRF、ネイティブ UHD、SoapySDR の各バックエンドを利用できます。
+`--bits 8` は HackRF 互換の CS8、`--bits 16` は UHD/SoapySDR のネイティブ
+CS16 入力です。HackRF の物理 ADC は 8bit のため、SoapyHackRF で `--bits 16`
+を指定しても実際の RF 精度は増えません。
+
+```sh
+./build/fpvdec --source uhd --bits 16 --channel A1 --uhd-gain 50
+./build/fpvdec --source soapysdr --bits 16 \
+  --device "driver=uhd,serial=H9SA2HE" --channel A1
+./build/fpvdec --source hackrf --bits 8 --channel A1
+```
 
 ## ビルド
 
@@ -64,7 +80,8 @@ cmake --build build --config Release
 
 ```sh
 brew install hackrf sdl2 cmake pkg-config   # apt でも同等
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+# UHD / SoapySDR は必要に応じて追加
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DSOAPYSDR=ON -DUHD=ON -DWEBGUI=ON
 cmake --build build -j
 ```
 
@@ -121,7 +138,7 @@ cmake --build build -j
 ## 動作原理
 
 ```
-HackRF One (10 MSPS、チャンネルに同調; AFC が VTX 中心へ再同調)
+HackRF / UHD / SoapySDR (10 MSPS、チャンネルに同調; AFC が VTX 中心へ再同調)
   → 複素 DC ブロッカ
   → 4.9 MHz 複素チャンネル LPF(クロマ上側波帯までフラット)
   → FM 直交ディスクリミネータ(AVX2; シンクチップが正になる極性)
