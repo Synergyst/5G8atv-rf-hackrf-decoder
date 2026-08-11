@@ -11,7 +11,7 @@
 namespace famidec {
 namespace {
 constexpr size_t kRingBytes = 1u << 25;       // 32 MiB
-constexpr long kRecvTimeout = 0.1;             // seconds
+constexpr double kRecvTimeout = 0.1;            // seconds
 constexpr double kSc16Clip = 32000.0;
 }
 
@@ -72,11 +72,28 @@ void UhdSource::stop() {
 
 void UhdSource::pause() {
     running_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(control_mutex_);
+        if (rx_streamer_) {
+            try {
+                uhd::stream_cmd_t stop_cmd(
+                    uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+                rx_streamer_->issue_stream_cmd(stop_cmd);
+            } catch (...) {
+            }
+        }
+    }
+    // The receive worker is explicit in the native UHD backend. It must be
+    // joined before auto-resolution or a full application reload resumes it;
+    // merely flipping running_ leaves an exited joinable worker behind.
+    if (worker_.joinable()) worker_.join();
 }
 
 void UhdSource::resume() {
-    if (!rx_streamer_) return;
+    std::lock_guard<std::mutex> lock(control_mutex_);
+    if (!rx_streamer_ || worker_.joinable()) return;
     running_.store(true, std::memory_order_release);
+    worker_ = std::thread(&UhdSource::rx_loop, this);
 }
 
 void UhdSource::rx_loop() {
@@ -86,6 +103,7 @@ void UhdSource::rx_loop() {
     std::vector<uint8_t> sc16_bytes(spb * 4);
     uhd::rx_metadata_t md;
 
+    unsigned consecutive_errors = 0;
     try {
         uhd::stream_cmd_t start_cmd(
             uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
@@ -93,30 +111,65 @@ void UhdSource::rx_loop() {
         rx_streamer_->issue_stream_cmd(start_cmd);
 
         while (running_.load(std::memory_order_acquire)) {
-            size_t n = rx_streamer_->recv(sc16.data(), spb, md, kRecvTimeout);
-            if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) continue;
-            if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE || n == 0) {
-                if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW)
+            try {
+                size_t n = rx_streamer_->recv(sc16.data(), spb, md, kRecvTimeout);
+                if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT)
                     continue;
-                if (running_.load(std::memory_order_acquire))
+                if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW) {
+                    // UHD reports USB overruns here; discard the affected
+                    // packet and keep receiving instead of killing the worker.
+                    consecutive_errors = 0;
+                    continue;
+                }
+                if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
+                    ++consecutive_errors;
+                    if (consecutive_errors == 1)
+                        std::fprintf(stderr, "UHD receive warning: %s\n", md.strerror().c_str());
+                    if (consecutive_errors < 100) continue;
                     error_ = std::string("UHD receive: ") + md.strerror();
-                break;
-            }
+                    break;
+                }
+                if (n == 0) continue;
+                consecutive_errors = 0;
 
-            uint64_t clips = 0;
-            for (size_t i = 0; i < n * 2; ++i) {
-                const int16_t sample = sc16[i];
-                if (std::abs(static_cast<int>(sample)) >= kSc16Clip) ++clips;
-                sc8[i] = static_cast<uint8_t>(static_cast<int8_t>(sample >> 8));
-            }
-            total_.fetch_add(n * 4, std::memory_order_relaxed);
-            if (clips) clipped_.fetch_add(clips, std::memory_order_relaxed);
-            if (format_ == SampleFormat::CS16) {
-                std::memcpy(sc16_bytes.data(), sc16.data(), n * 4);
-                if (!ring_.push(sc16_bytes.data(), n * 4))
-                    dropped_.fetch_add(n * 4, std::memory_order_relaxed);
-            } else if (!ring_.push(sc8.data(), n * 2)) {
-                dropped_.fetch_add(n * 2, std::memory_order_relaxed);
+                uint64_t clips = 0;
+                for (size_t i = 0; i < n * 2; ++i) {
+                    const int16_t sample = sc16[i];
+                    if (std::abs(static_cast<int>(sample)) >= kSc16Clip) ++clips;
+                    sc8[i] = static_cast<uint8_t>(static_cast<int8_t>(sample >> 8));
+                }
+                total_.fetch_add(n * 4, std::memory_order_relaxed);
+                if (clips) clipped_.fetch_add(clips, std::memory_order_relaxed);
+                if (format_ == SampleFormat::CS16) {
+                    std::memcpy(sc16_bytes.data(), sc16.data(), n * 4);
+                    if (!ring_.push(sc16_bytes.data(), n * 4))
+                        dropped_.fetch_add(n * 4, std::memory_order_relaxed);
+                } else if (!ring_.push(sc8.data(), n * 2)) {
+                    dropped_.fetch_add(n * 2, std::memory_order_relaxed);
+                }
+            } catch (const std::exception& e) {
+                if (!running_.load(std::memory_order_acquire)) break;
+                ++consecutive_errors;
+                std::fprintf(stderr, "UHD receive exception (%u): %s\n",
+                             consecutive_errors, e.what());
+                if (consecutive_errors >= 10) {
+                    error_ = std::string("UHD receive: ") + e.what();
+                    break;
+                }
+                // Reissue the stream command after a transient UHD/USB error.
+                try {
+                    uhd::stream_cmd_t stop_cmd(
+                        uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS);
+                    rx_streamer_->issue_stream_cmd(stop_cmd);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    uhd::stream_cmd_t restart_cmd(
+                        uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+                    restart_cmd.stream_now = true;
+                    rx_streamer_->issue_stream_cmd(restart_cmd);
+                } catch (const std::exception& restart_error) {
+                    error_ = std::string("UHD stream restart: ") + restart_error.what();
+                    break;
+                }
             }
         }
 
@@ -127,7 +180,7 @@ void UhdSource::rx_loop() {
         }
     } catch (const std::exception& e) {
         if (running_.load(std::memory_order_acquire))
-            error_ = std::string("UHD receive: ") + e.what();
+            error_ = std::string("UHD receive setup: ") + e.what();
     }
     running_.store(false, std::memory_order_release);
 }

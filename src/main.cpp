@@ -688,10 +688,8 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         
-        // Stop DSP thread and restart source stream cleanly.
-        // For SoapySDR/UHD, we must not just flip g_running — the readStream()
-        // call may be blocked inside the UHD library and won't see the flag.
-        // pause()/resume() re-activate the stream to unblock it, then restart.
+        // Stop DSP thread and restart source stream cleanly. The source
+        // pause/resume pair owns the backend-specific stream lifecycle.
         src->pause();
         tmp_dsp.join();
         src->resume();

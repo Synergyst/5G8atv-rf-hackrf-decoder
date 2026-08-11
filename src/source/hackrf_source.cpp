@@ -90,13 +90,14 @@ void HackRfSource::stop() {
 }
 
 void HackRfSource::pause() {
-    // Set running_ = false so read() returns immediately, unblocking the
-    // DSP thread which is blocked inside read() during auto-res detection.
-    running_.store(false, std::memory_order_relaxed);
+    // Stop the libhackrf stream as well as marking the source paused. Merely
+    // flipping running_ can leave the USB callback stopped while resume()
+    // only changes the flag, causing the next DSP instance to see EOF.
+    stop();
 }
 
 void HackRfSource::resume() {
-    running_.store(true, std::memory_order_relaxed);
+    start();
 }
 
 size_t HackRfSource::read(uint8_t* buf, size_t len) {
