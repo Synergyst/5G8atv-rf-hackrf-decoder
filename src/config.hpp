@@ -1,8 +1,85 @@
 #pragma once
 
 #include <string>
+#include <vector>
+#include <mutex>
 
 namespace famidec {
+
+// ── Dynamic Config Event System ──────────────────────────────────────────────
+// Thread-safe queue for config changes from Web GUI to DSP thread.
+
+enum ConfigChangeType {
+    CFG_FM_DEV,
+    CFG_INVERT,
+    CFG_SATURATION,
+    CFG_HUE_DEG,
+    CFG_OVERSCAN,
+    CFG_VIDEO_LPF,
+    CFG_AFC,
+    CFG_DENOISE,
+    CFG_DENOISE_TEMPORAL,
+    CFG_DENOISE_MEDIAN,
+    CFG_DENOINE_MEDIAN_STRENGTH,
+    CFG_SAMPLE_RATE,
+    CFG_VIDEO_CARRIER,
+    CFG_OFFSET_HZ,
+    CFG_LNA_GAIN,
+    CFG_VGA_GAIN,
+    CFG_AMP,
+    CFG_GAIN_AUTO,
+    CFG_FRAME_WIDTH,
+    CFG_FRAME_HEIGHT,
+    CFG_AUTO_DETECT,
+    CFG_CLkout,
+    CFG_ENFORCE_CLKIN,
+};
+
+struct ConfigChangeEvent {
+    ConfigChangeType type;
+    union {
+        int int_val;
+        double dbl_val;
+        bool bool_val;
+        float flt_val;
+    } val;
+};
+
+class ConfigChangeQueue {
+public:
+    void push(const ConfigChangeEvent& event) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (events_.size() < 100) events_.push_back(event);
+    }
+
+    void push(const std::vector<ConfigChangeEvent>& src_events) {
+        for (auto& e : src_events) {
+            if (events_.size() < 100) events_.push_back(e);
+        }
+    }
+
+    bool has_events() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return !events_.empty();
+    }
+
+    bool pop(ConfigChangeEvent& out) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (events_.empty()) return false;
+        out = events_.front();
+        events_.erase(events_.begin());
+        return true;
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lk(mu_);
+        events_.clear();
+    }
+
+private:
+    std::mutex mu_;
+    std::vector<ConfigChangeEvent> events_;
+};
 
 struct Config {
     // RF
@@ -45,7 +122,7 @@ struct Config {
                                     // limits to the NTSC video bandwidth)
 
     std::string record_path;          // tee raw IQ to .cs8 while decoding
-    std::string dump_composite_path;  // post-AGC composite as f32
+    std::string dump_composite_path;  // dump post-AGC composite as f32
     bool spectrum = false;            // PSD printout mode, no video
     bool headless = false;            // decode without SDL window (dump frames)
     std::string dump_frames_prefix;   // write decoded frames as PPM
@@ -107,7 +184,7 @@ struct Config {
     int overlay_margin_x = 8;         // horizontal margin from edge (default: 8)
     int overlay_margin_y = 8;         // vertical margin from edge (default: 8)
     enum class OverlayPos { Top, Bottom };
-    OverlayPos overlay_position = OverlayPos::Top;  // top or bottom (default: top)
+    OverlayPos overlay_position = OverlayPos::Top;  // top or bottom (default: Top)
 
     // Overlay section visibility — default true (enabled). Use --no-* to hide.
     bool show_signal = true;          // ring buffer, chroma bar, clipping
@@ -116,12 +193,13 @@ struct Config {
     bool show_stats = true;           // frames, dropped, clipping, latency
 
     // Debug mode: run DSP pipeline without GUI, print periodic stats to stdout.
-    // Useful for diagnosing source issues (e.g. SoapySDR crashes) without the
-    // SDL/ImGui layer. Ctrl+C to exit; --debug-duration N for finite runs.
+    // Useful for diagnosing source issues (e.g. SoapySDR crashes) without
+    // the SDL/ImGui layer.
     bool debug_mode = false;
     int debug_duration_sec = 0;  // 0 = infinite, >0 = auto-exit after N seconds
+}
 
-    double center_hz() const { return video_carrier_hz + offset_hz; }
+double center_hz() const { return video_carrier_hz + offset_hz; }
 };
 
 }  // namespace famidec

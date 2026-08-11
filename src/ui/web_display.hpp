@@ -16,8 +16,6 @@
 
 namespace famidec {
 
-// Forward declaration — defined in main.cpp
-class ConfigChangeQueue;
 
 // Web display server — headless browser-based control panel.
 // Provides an HTTP server that serves a browser UI with real-time

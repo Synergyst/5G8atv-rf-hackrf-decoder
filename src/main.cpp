@@ -40,128 +40,6 @@
 
 using namespace famidec;
 
-// ── Dynamic Config Event System ──────────────────────────────────────────────
-// Thread-safe queue for config changes from Web GUI to DSP thread.
-
-enum ConfigChangeType {
-    CFG_FM_DEV,
-    CFG_INVERT,
-    CFG_SATURATION,
-    CFG_HUE_DEG,
-    CFG_OVERSCAN,
-    CFG_VIDEO_LPF,
-    CFG_AFC,
-    CFG_DENOISE,
-    CFG_DENOISE_TEMPORAL,
-    CFG_DENOISE_MEDIAN,
-    CFG_DENOINE_MEDIAN_STRENGTH,
-    CFG_SAMPLE_RATE,
-    CFG_VIDEO_CARRIER,
-    CFG_OFFSET_HZ,
-    CFG_LNA_GAIN,
-    CFG_VGA_GAIN,
-    CFG_AMP,
-    CFG_GAIN_AUTO,
-    CFG_FRAME_WIDTH,
-    CFG_FRAME_HEIGHT,
-    CFG_AUTO_DETECT,
-    CFG_CLkout,
-    CFG_ENFORCE_CLKIN,
-};
-
-struct ConfigChangeEvent {
-    ConfigChangeType type;
-    union {
-        int int_val;
-        double dbl_val;
-        bool bool_val;
-        float flt_val;
-    } val;
-};
-
-class ConfigChangeQueue {
-public:
-    void push(const ConfigChangeEvent& event) {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (events_.size() < 100) events_.push_back(event);
-    }
-
-    void push(const std::vector<ConfigChangeEvent>& src_events) {
-        for (auto& e : src_events) {
-            if (events_.size() < 100) events_.push_back(e);
-        }
-    }
-
-    bool has_events() {
-        std::lock_guard<std::mutex> lk(mu_);
-        return !events_.empty();
-    }
-
-    bool pop(ConfigChangeEvent& out) {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (events_.empty()) return false;
-        out = events_.front();
-        events_.erase(events_.begin());
-        return true;
-    }
-
-    void clear() {
-        std::lock_guard<std::mutex> lk(mu_);
-        events_.clear();
-    }
-
-private:
-    std::mutex mu_;
-    std::vector<ConfigChangeEvent> events_;
-};
-
-// Helper to push config changes
-static void push_config(ConfigChangeQueue& queue, const Config& cfg) {
-    auto push_bool = [&](ConfigChangeType type, bool val) {
-        ConfigChangeEvent evt = {type};
-        evt.val.bool_val = val;
-        queue.push(evt);
-    };
-    auto push_double = [&](ConfigChangeType type, double val) {
-        ConfigChangeEvent evt = {type};
-        evt.val.dbl_val = val;
-        queue.push(evt);
-    };
-    auto push_float = [&](ConfigChangeType type, float val) {
-        ConfigChangeEvent evt = {type};
-        evt.val.flt_val = val;
-        queue.push(evt);
-    };
-    auto push_int = [&](ConfigChangeType type, int val) {
-        ConfigChangeEvent evt = {type};
-        evt.val.int_val = val;
-        queue.push(evt);
-    };
-
-    push_double(CFG_FM_DEV, cfg.fm_dev_hz);
-    push_bool(CFG_INVERT, cfg.invert);
-    push_float(CFG_SATURATION, cfg.saturation);
-    push_float(CFG_HUE_DEG, cfg.hue_deg);
-    push_float(CFG_OVERSCAN, cfg.overscan);
-    push_double(CFG_VIDEO_LPF, cfg.video_lpf_hz);
-    push_bool(CFG_AFC, cfg.afc);
-    push_float(CFG_DENOISE, cfg.denoise);
-    push_float(CFG_DENOISE_TEMPORAL, cfg.denoise_temporal);
-    push_int(CFG_DENOISE_MEDIAN, cfg.denoise_temporal_median);
-    push_float(CFG_DENOINE_MEDIAN_STRENGTH, cfg.denoise_temporal_median_strength);
-    push_double(CFG_SAMPLE_RATE, cfg.sample_rate);
-    push_double(CFG_VIDEO_CARRIER, cfg.video_carrier_hz);
-    push_double(CFG_OFFSET_HZ, cfg.offset_hz);
-    push_int(CFG_LNA_GAIN, cfg.lna_gain);
-    push_int(CFG_VGA_GAIN, cfg.vga_gain);
-    push_bool(CFG_AMP, cfg.amp);
-    push_bool(CFG_GAIN_AUTO, cfg.gain_auto);
-    push_int(CFG_FRAME_WIDTH, cfg.frame_width);
-    push_int(CFG_FRAME_HEIGHT, cfg.frame_height);
-    push_bool(CFG_AUTO_DETECT, cfg.auto_detect);
-    push_bool(CFG_CLkout, cfg.clkout);
-    push_bool(CFG_ENFORCE_CLKIN, cfg.enforce_clkin);
-}
 
 namespace {
 
@@ -566,8 +444,11 @@ void dsp_thread(ConfigChangeQueue* events,
                         break;
                     }
                     case CFG_SAMPLE_RATE: {
-                        // Sample rate change requires full restart — log warning
-                        std::printf("DSP: sample_rate change requires restart\n");
+                        std::printf("DSP: sample_rate changed to %.1f MSPS, rebuilding filters\n", cfg.sample_rate / 1e6);
+                        fm_det = FmDetector(cfg.sample_rate, fm_dev, invert);
+                        video_lpf_filter = FirFilterF(design_lowpass(
+                            use_video_lpf ? std::min(video_lpf, cfg.sample_rate * 0.45) : 1.0,
+                            cfg.sample_rate, 63));
                         break;
                     }
                     default: break;

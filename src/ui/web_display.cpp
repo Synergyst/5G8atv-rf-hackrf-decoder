@@ -478,15 +478,37 @@ void WebDisplay::server_thread_func() {
             return std::nullopt;
         };
 
+        auto push_evt = [&](ConfigChangeType type, auto val) {
+            if (config_queue_) {
+                ConfigChangeEvent evt = {type};
+                if constexpr (std::is_same_v<decltype(val), bool>) evt.val.bool_val = val;
+                else if constexpr (std::is_same_v<decltype(val), int>) evt.val.int_val = val;
+                else if constexpr (std::is_same_v<decltype(val), float>) evt.val.flt_val = val;
+                else if constexpr (std::is_same_v<decltype(val), double>) evt.val.dbl_val = val;
+                config_queue_->push(evt);
+            }
+        };
+
+        auto push_evt = [&](ConfigChangeType type, auto val) {
+            if (config_queue_) {
+                ConfigChangeEvent evt = {type};
+                if constexpr (std::is_same_v<decltype(val), bool>) evt.val.bool_val = val;
+                else if constexpr (std::is_same_v<decltype(val), int>) evt.val.int_val = val;
+                else if constexpr (std::is_same_v<decltype(val), float>) evt.val.flt_val = val;
+                else if constexpr (std::is_same_v<decltype(val), double>) evt.val.dbl_val = val;
+                config_queue_->push(evt);
+            }
+        };
+
         bool any_change = false;
 
-        if (auto v = get_bool_field("afc")) { cfg_->afc = *v; any_change = true; std::printf("WebGUI: afc=%s\n", *v ? "true" : "false"); }
-        if (auto v = get_bool_field("invert")) { cfg_->invert = *v; any_change = true; std::printf("WebGUI: invert=%s\n", *v ? "true" : "false"); }
-        if (auto v = get_bool_field("gain_auto")) { cfg_->gain_auto = *v; any_change = true; std::printf("WebGUI: gain_auto=%s\n", *v ? "true" : "false"); }
-        if (auto v = get_bool_field("amp")) { cfg_->amp = *v; any_change = true; std::printf("WebGUI: amp=%s\n", *v ? "true" : "false"); }
-        if (auto v = get_bool_field("auto_detect")) { cfg_->auto_detect = *v; any_change = true; std::printf("WebGUI: auto_detect=%s\n", *v ? "true" : "false"); }
-        if (auto v = get_bool_field("clkout")) { cfg_->clkout = *v; any_change = true; std::printf("WebGUI: clkout=%s\n", *v ? "true" : "false"); }
-        if (auto v = get_bool_field("enforce_clkin")) { cfg_->enforce_clkin = *v; any_change = true; std::printf("WebGUI: enforce_clkin=%s\n", *v ? "true" : "false"); }
+        if (auto v = get_bool_field("afc")) { cfg_->afc = *v; any_change = true; std::printf("WebGUI: afc=%s\\n", *v ? \"true\" : \"false\"); push_evt(CFG_AFC, cfg_->afc); }
+        if (auto v = get_bool_field("invert")) { cfg_->invert = *v; any_change = true; std::printf("WebGUI: invert=%s\\n", *v ? \"true\" : \"false\"); push_evt(CFG_INVERT, cfg_->invert); }
+        if (auto v = get_bool_field("gain_auto")) { cfg_->gain_auto = *v; any_change = true; std::printf("WebGUI: gain_auto=%s\\n", *v ? \"true\" : \"false\"); push_evt(CFG_GAIN_AUTO, cfg_->gain_auto); }
+        if (auto v = get_bool_field("amp")) { cfg_->amp = *v; any_change = true; std::printf("WebGUI: amp=%s\\n", *v ? \"true\" : \"false\"); push_evt(CFG_AMP, cfg_->amp); }
+        if (auto v = get_bool_field("auto_detect")) { cfg_->auto_detect = *v; any_change = true; std::printf("WebGUI: auto_detect=%s\\n", *v ? \"true\" : \"false\"); push_evt(CFG_AUTO_DETECT, cfg_->auto_detect); }
+        if (auto v = get_bool_field("clkout")) { cfg_->clkout = *v; any_change = true; std::printf("WebGUI: clkout=%s\\n", *v ? \"true\" : \"false\"); push_evt(CFG_CLkout, cfg_->clkout); }
+        if (auto v = get_bool_field("enforce_clkin")) { cfg_->enforce_clkin = *v; any_change = true; std::printf("WebGUI: enforce_clkin=%s\\n", *v ? \"true\" : \"false\"); push_evt(CFG_ENFORCE_CLKIN, cfg_->enforce_clkin); }
 
         auto apply_int = [&](const std::string& key, auto clamp_fn) {
             auto v = get_num_field(key);
