@@ -211,6 +211,64 @@ and other SoapySDR devices.
 `--enforce-clkin`, and `--no-clkout` may not be applicable, as gain control
 and clocking are device-dependent.
 
+## Native UHD and SoapySDR sources
+
+fpvdec also has a native UHD source for UHD-compatible radios such as the
+Ettus B200/B210 and LibreSDR B220mini. This path was tested on a B210 and
+produced a clear live decode; UHD receives native `sc16` samples and the
+source converts them to the signed 8-bit interleaved IQ format currently used
+by the fpvdec DSP. One initial UHD USB overrun was observed while the GUI was
+opening on an older Dell system; this did not persist during decoding.
+
+Build native UHD support with:
+
+```sh
+./build-only.sh uhd
+./build/fpvdec --source uhd --channel A1
+```
+
+Useful native UHD options are `--uhd-device`, `--uhd-gain`, and `--antenna`,
+for example:
+
+```sh
+./build/fpvdec --source uhd --uhd-device "addr=192.168.10.2" \
+  --uhd-gain 50 --channel A1
+```
+
+SoapySDR support is also available through `--source soapysdr`. The backend
+uses a worker thread and ring buffer, receives `CS16`, converts it to the
+signed 8-bit interleaved IQ format used by the current DSP, and handles stream
+timeouts/overruns. It has been tested with the LibreSDR B220mini through the
+UHD SoapySDR module and is suitable for user testing. Device capabilities and
+gain names vary by driver, so the reported gain controls are necessarily
+best-effort.
+
+Build all optional backends and the Web GUI with:
+
+```sh
+./build-only.sh all
+```
+
+Example using the B220mini through SoapyUHD:
+
+```sh
+./build/fpvdec --source soapysdr \
+  --device "driver=uhd,serial=H9SA2HE" \
+  --channel A1 --gui web --web-port 9090
+```
+
+Example using a HackRF through SoapyHackRF:
+
+```sh
+./build/fpvdec --source soapysdr \
+  --device "driver=hackrf,serial=000000000000000066a062dc2732819f" \
+  --channel A1 --gui web
+```
+
+The current DSP accepts signed 8-bit IQ. Native 16-bit support is intentionally
+planned for a later stage because it requires a wider DSP/AGC and sample-format
+rework rather than only a source-driver change.
+
 ## Build
 
 ### Windows (MSVC)
@@ -303,8 +361,11 @@ cmake --build build -j
 | `--resolution WxH` | output resolution (default 640×480) |
 | `--aspect 4:3\|16:9\|16:10\|5:4` | aspect ratio preset (default: use resolution dimensions) |
 | `--auto-res` | auto-detect signal standard and suggest resolution |
-| `--source hackrf\|file\|soapysdr` | input source (default: hackrf) |
-| `--device ARGS` | SoapySDR device args (e.g., 'driver=uhd') |
+| `--source hackrf\|file\|soapysdr\|uhd` | input source (default: hackrf) |
+| `--device ARGS` | SoapySDR device args (e.g., 'driver=uhd,serial=H9SA2HE') |
+| `--uhd-device ARGS` | Native UHD device args (e.g., 'addr=192.168.10.2') |
+| `--uhd-gain DB` | Native UHD aggregate RX gain (default 45 dB) |
+| `--antenna NAME` | Native UHD RX antenna selection |
 
 #### Resolution & Aspect Ratio
 

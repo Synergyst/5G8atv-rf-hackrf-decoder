@@ -1,25 +1,27 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 
 #include "../config.hpp"
 #include "../dsp/ring_buffer.hpp"
 #include "sample_source.hpp"
 
-// Forward declaration for SoapySDR types
-namespace SoapySDR { class Device; struct Stream; }
+#include <uhd/usrp/multi_usrp.hpp>
 
 namespace famidec {
 
-class SoapySource : public ISampleSource {
+// Native UHD input source. UHD receives sc16 samples on a worker thread,
+// converts them to interleaved signed 8-bit IQ, and exposes the same pull
+// interface used by HackRfSource and FileSource.
+class UhdSource : public ISampleSource {
 public:
-    explicit SoapySource(const Config& cfg, const std::string& device_args = "");
-    ~SoapySource() override;
+    explicit UhdSource(const Config& cfg);
+    ~UhdSource() override;
 
     bool start() override;
     void stop() override;
@@ -41,25 +43,19 @@ public:
     }
     float ring_fill() const override;
 
-    bool set_gains(int lna, int vga) override;
     bool set_center_freq(double center_hz) override;
-    int lna() const { return lna_; }
-    int vga() const { return vga_; }
+    bool set_gains(int lna, int vga) override;
+    bool set_amp(bool on) override;
 
-    const std::string& device_info() const { return device_info_; }
-    static std::vector<std::string> enumerate_devices();
     const std::string& error() const override { return error_; }
+    const std::string& device_info() const { return device_info_; }
 
 private:
-    bool configure_gains_locked();
-    bool set_gains_locked(int lna, int vga);
     void rx_loop();
 
     const Config& cfg_;
-    std::string device_args_;
-
-    SoapySDR::Device* device_ = nullptr;
-    SoapySDR::Stream* stream_ = nullptr;
+    uhd::usrp::multi_usrp::sptr usrp_;
+    uhd::rx_streamer::sptr rx_streamer_;
     SpscRing ring_;
 
     std::atomic<uint64_t> dropped_{0};
@@ -67,11 +63,11 @@ private:
     std::atomic<uint64_t> clipped_{0};
     std::atomic<bool> running_{false};
     std::thread worker_;
+    mutable std::mutex control_mutex_;
 
-    int lna_{20}, vga_{20};
+    double uhd_gain_ = 0.0;
     std::string device_info_;
     std::string error_;
-    mutable std::mutex mu_;
 };
 
 }  // namespace famidec

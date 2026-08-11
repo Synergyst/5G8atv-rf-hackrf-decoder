@@ -46,6 +46,11 @@ if(SOAPYSDR)
     find_package(SoapySDR REQUIRED)
 endif()
 
+option(UHD "Enable native UHD support" OFF)
+if(UHD)
+    find_package(UHD REQUIRED)
+endif()
+
 add_library(fpv_dsp STATIC
     src/dsp/ntsc_decoder.cpp
 )
@@ -74,6 +79,14 @@ if(WEBGUI)
     target_link_libraries(fpvdec PRIVATE Threads::Threads ${JPEG_LIBRARIES})
     target_include_directories(fpvdec PRIVATE ${JPEG_INCLUDE_DIRS})
     target_compile_definitions(fpvdec PRIVATE HAVE_WEBGUI)
+endif()
+
+# Add native UHD source and dependencies if enabled
+if(UHD)
+    target_sources(fpvdec PRIVATE src/source/uhd_source.cpp)
+    target_link_libraries(fpvdec PRIVATE ${UHD_LIBRARIES})
+    target_include_directories(fpvdec PRIVATE ${UHD_INCLUDE_DIRS})
+    target_compile_definitions(fpvdec PRIVATE HAVE_UHD)
 endif()
 
 # Add SoapySDR source and dependencies if enabled

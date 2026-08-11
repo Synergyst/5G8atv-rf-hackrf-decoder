@@ -5,31 +5,30 @@
 
 #include <algorithm>
 #include <chrono>
-#include <thread>
+#include <cmath>
+#include <cstdint>
 #include <sstream>
+#include <stdexcept>
+#include <thread>
 
 namespace famidec {
-
 namespace {
-constexpr size_t kRingBytes = 1u << 25;  // 32 MiB ~ 1.6 s at 10 MSPS
-constexpr size_t kReadBatchSamples = 1 << 14;  // 16384 complex samples per read (~1.6ms at 10 MSPS)
-constexpr const char* kSampleFormat = SOAPY_SDR_CS16;  // Complex 16-bit (native B210 format)
-constexpr long kReadTimeoutUs = 100000;  // 100ms timeout in microseconds
-}  // namespace
+constexpr size_t kRingBytes = 1u << 25;
+constexpr size_t kReadBatchSamples = 1u << 14;
+constexpr long kReadTimeoutUs = 100000;
+constexpr int16_t kClipThreshold = 32000;
+}
 
 SoapySource::SoapySource(const Config& cfg, const std::string& device_args)
-    : cfg_(cfg), device_args_(device_args), ring_(kRingBytes) {}
+    : cfg_(cfg), device_args_(device_args), ring_(kRingBytes),
+      lna_(cfg.lna_gain), vga_(cfg.vga_gain) {}
 
-SoapySource::~SoapySource() {
-    stop();
-}
+SoapySource::~SoapySource() { stop(); }
 
 std::vector<std::string> SoapySource::enumerate_devices() {
     std::vector<std::string> devices;
     try {
-        auto args_list = SoapySDR::Device::enumerate();
-        for (const auto& args : args_list) {
-            // Build a human-readable string from the Kwargs map
+        for (const auto& args : SoapySDR::Device::enumerate()) {
             std::ostringstream oss;
             bool first = true;
             for (const auto& kv : args) {
@@ -40,324 +39,214 @@ std::vector<std::string> SoapySource::enumerate_devices() {
             devices.push_back(oss.str());
         }
     } catch (...) {
-        // Return empty on error
     }
     return devices;
 }
 
-bool SoapySource::configure_gains() {
+bool SoapySource::configure_gains_locked() {
     if (!device_) return false;
-
-    bool configured = false;
-    
-    // Get list of available gain names
     try {
-        auto gain_names = device_->listGains(SOAPY_SDR_RX, 0);
-        
-        // Try to set middle values for common gain names
-        for (const auto& name : gain_names) {
+        auto names = device_->listGains(SOAPY_SDR_RX, 0);
+        if (names.empty()) {
+            device_->setGain(SOAPY_SDR_RX, 0, 0.0);
+            return true;
+        }
+        bool ok = false;
+        for (const auto& name : names) {
             try {
                 auto range = device_->getGainRange(SOAPY_SDR_RX, 0, name);
-                double middle = (range.minimum() + range.maximum()) / 2.0;
-                device_->setGain(SOAPY_SDR_RX, 0, name, middle);
-                
-                // Map to our internal values based on name
-                if (name.find("LNA") != std::string::npos || 
-                    name.find("RF") != std::string::npos) {
-                    // Map 0-32 dB to 0-40
-                    lna_ = static_cast<int>((middle / 32.0) * 40.0);
-                } else if (name.find("VGA") != std::string::npos) {
-                    // Map 0-47 dB to 0-62
-                    vga_ = static_cast<int>((middle / 47.0) * 62.0);
-                }
-                
-                configured = true;
+                double value = (range.minimum() + range.maximum()) * 0.5;
+                device_->setGain(SOAPY_SDR_RX, 0, name, value);
+                ok = true;
             } catch (...) {
-                // Skip gains that fail
+            }
+        }
+        return ok;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool SoapySource::set_gains_locked(int lna, int vga) {
+    if (!device_) return false;
+    lna_ = std::clamp((lna / 8) * 8, 0, 40);
+    vga_ = std::clamp((vga / 2) * 2, 0, 62);
+    bool ok = false;
+    try {
+        auto names = device_->listGains(SOAPY_SDR_RX, 0);
+        for (const auto& name : names) {
+            try {
+                auto range = device_->getGainRange(SOAPY_SDR_RX, 0, name);
+                double fraction = 0.5;
+                if (name.find("LNA") != std::string::npos ||
+                    name.find("RF") != std::string::npos) {
+                    fraction = static_cast<double>(lna_) / 40.0;
+                } else if (name.find("VGA") != std::string::npos) {
+                    fraction = static_cast<double>(vga_) / 62.0;
+                }
+                const double value = range.minimum() +
+                    std::clamp(fraction, 0.0, 1.0) *
+                    (range.maximum() - range.minimum());
+                device_->setGain(SOAPY_SDR_RX, 0, name, value);
+                ok = true;
+            } catch (...) {
             }
         }
     } catch (...) {
-        // No gains available
     }
-    
-    return configured;
+    return ok;
 }
 
 bool SoapySource::start() {
-    std::lock_guard<std::mutex> lk(mu_);
+    std::lock_guard<std::mutex> lock(mu_);
+    if (running_.load(std::memory_order_acquire)) return true;
 
-    // Open device
     try {
-        if (!device_args_.empty()) {
-            device_ = SoapySDR::Device::make(device_args_);
-        } else {
-            device_ = SoapySDR::Device::make();
-        }
-    } catch (const std::exception& e) {
-        error_ = std::string("SoapySDR::make: ") + e.what();
-        return false;
-    }
-
-    if (!device_) {
-        error_ = "Failed to open SoapySDR device";
-        return false;
-    }
-
-    // Get device info
-    try {
-        auto hw = device_->getHardwareInfo();
-        device_info_ = hw.count("driver") ? hw.at("driver") : "SoapySDR";
-        if (hw.count("version")) {
-            device_info_ += " v" + hw.at("version");
-        }
-        if (hw.count("product")) {
-            device_info_ += " (" + hw.at("product") + ")";
-        }
-    } catch (...) {
-        device_info_ = "SoapySDR device";
-    }
-
-    // Set sample rate
-    try {
-        device_->setSampleRate(SOAPY_SDR_RX, 0, cfg_.sample_rate);
-    } catch (const std::exception& e) {
-        error_ = std::string("setSampleRate: ") + e.what();
-        return false;
-    }
-
-    // Set frequency (SoapySDR uses MHz)
-    try {
-        device_->setFrequency(SOAPY_SDR_RX, 0, cfg_.center_hz() / 1e6, {});
-    } catch (const std::exception& e) {
-        error_ = std::string("setFrequency: ") + e.what();
-        return false;
-    }
-
-    // Configure gains
-    configure_gains();
-
-    // Setup stream
-    try {
-        stream_ = device_->setupStream(
-            SOAPY_SDR_RX, kSampleFormat, {0}, {});
-        if (!stream_) {
-            error_ = "Failed to setup SoapySDR stream";
+        device_ = device_args_.empty() ? SoapySDR::Device::make()
+                                        : SoapySDR::Device::make(device_args_);
+        if (!device_) {
+            error_ = "SoapySDR::make returned no device";
             return false;
         }
-    } catch (const std::exception& e) {
-        error_ = std::string("setupStream: ") + e.what();
-        return false;
-    }
+        auto hw = device_->getHardwareInfo();
+        device_info_ = hw.count("driver") ? hw.at("driver") : "SoapySDR";
+        if (hw.count("product")) device_info_ += " (" + hw.at("product") + ")";
 
-    // Activate stream
-    try {
+        device_->setSampleRate(SOAPY_SDR_RX, 0, cfg_.sample_rate);
+        device_->setFrequency(SOAPY_SDR_RX, 0, cfg_.center_hz(), {});
+        configure_gains_locked();
+        set_gains_locked(cfg_.lna_gain, cfg_.vga_gain);
+
+        stream_ = device_->setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16, {0}, {});
+        if (!stream_) throw std::runtime_error("setupStream returned null");
         device_->activateStream(stream_, 0, 0, 0);
     } catch (const std::exception& e) {
-        error_ = std::string("activateStream: ") + e.what();
+        error_ = std::string("SoapySDR start: ") + e.what();
+        if (device_ && stream_) {
+            try { device_->closeStream(stream_); } catch (...) {}
+        }
+        stream_ = nullptr;
+        if (device_) SoapySDR::Device::unmake(device_);
+        device_ = nullptr;
         return false;
     }
 
-    running_.store(true, std::memory_order_relaxed);
+    error_.clear();
+    running_.store(true, std::memory_order_release);
+    worker_ = std::thread(&SoapySource::rx_loop, this);
     return true;
 }
 
 void SoapySource::stop() {
-    std::lock_guard<std::mutex> lk(mu_);
-    if (!device_) return;
-    
-    running_.store(false, std::memory_order_relaxed);
-    
-    try {
-        if (stream_) {
-            device_->deactivateStream(stream_, 0, 0);
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        running_.store(false, std::memory_order_release);
+        if (device_ && stream_) {
+            try { device_->deactivateStream(stream_, 0, 0); } catch (...) {}
         }
-    } catch (...) {
-        // Ignore errors during shutdown
     }
+    if (worker_.joinable()) worker_.join();
 
-    // Cleanup
-    if (stream_) {
-        try {
-            device_->closeStream(stream_);
-        } catch (...) {
-            // Ignore
-        }
-        stream_ = nullptr;
+    std::lock_guard<std::mutex> lock(mu_);
+    if (device_ && stream_) {
+        try { device_->closeStream(stream_); } catch (...) {}
     }
-    if (device_) {
-        delete device_;
-        device_ = nullptr;
-    }
+    stream_ = nullptr;
+    if (device_) SoapySDR::Device::unmake(device_);
+    device_ = nullptr;
 }
 
 void SoapySource::pause() {
-    // Just flip the running flag without touching the device.
-    // The DSP thread will see running_ == false and return from read(),
-    // allowing readStream() to timeout gracefully.
     running_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (device_ && stream_) {
+            try { device_->deactivateStream(stream_, 0, 0); } catch (...) {}
+        }
+    }
+    if (worker_.joinable()) worker_.join();
 }
 
 void SoapySource::resume() {
-    // Restart the stream without recreating the device.
-    // This is safe to call after pause() even if a readStream() call
-    // is blocked.
-    std::lock_guard<std::mutex> lk(mu_);
-    running_.store(true, std::memory_order_relaxed);
-    
-    if (device_ && stream_) {
-        try {
-            // Re-activate the stream so readStream() will unblock
-            device_->deactivateStream(stream_, 0, 0);
-            device_->activateStream(stream_, 0, 0, 0);
-        } catch (...) {
-            // Ignore
-        }
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!device_ || !stream_) return;
+    try {
+        device_->activateStream(stream_, 0, 0, 0);
+        running_.store(true, std::memory_order_release);
+        worker_ = std::thread(&SoapySource::rx_loop, this);
+    } catch (const std::exception& e) {
+        error_ = std::string("SoapySDR resume: ") + e.what();
     }
 }
 
-size_t SoapySource::read(uint8_t* buf, size_t len) {
-    if (!running_.load(std::memory_order_relaxed)) return 0;
-
-    size_t got = 0;
-
-    // Pre-allocate buffer outside loop to avoid repeated allocation
-    std::vector<int16_t> samples(kRingBytes / 2);
-
-    while (got < len && running_.load(std::memory_order_relaxed)) {
-        // Try to get data from ring buffer first
-        size_t n = ring_.pop(buf + got, len - got);
-        got += n;
-        if (n > 0) continue;
-
-        // Ring buffer empty, read from device using blocking I/O
-        // SoapySDR CS16 format: complex 16-bit = {I0,Q0,I1,Q1,...} as int16_t pairs
-        // readStream expects void* const* (array of buffer pointers)
+void SoapySource::rx_loop() {
+    std::vector<int16_t> samples(kReadBatchSamples * 2);
+    std::vector<uint8_t> converted(kReadBatchSamples * 2);
+    while (running_.load(std::memory_order_acquire)) {
         void* buffers[] = {samples.data()};
-        size_t nsamples = samples.size();  // in/out: requested / actual count
-        int status = 0;
-        long long timeNs = 0;
-
+        size_t requested = kReadBatchSamples;
+        int flags = 0;
+        long long time_ns = 0;
+        int actual = 0;
         try {
-            int actual = device_->readStream(
-                stream_,
-                buffers,
-                nsamples,
-                status,
-                timeNs,
-                100000);  // 100ms timeout in microseconds
-
-            if (actual < 0) {
-                // Error: sleep briefly and retry
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
-            }
-            if (actual == 0) {
-                // No data available within timeout: sleep to avoid busy loop
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                continue;
-            }
-
-            {
-                // Convert CS16 (16-bit) to interleaved int8_t for fpvdec pipeline
-                // CS16: each complex sample = I16,Q16 (2 int16_t = 4 bytes)
-                static std::vector<uint8_t> converted(kRingBytes);
-                size_t out_idx = 0;
-                
-                // Clip detection on 16-bit values
-                uint64_t clips = 0;
-                for (int i = 0; i < actual; i++) {
-                    int16_t i_sample = samples[i * 2];
-                    int16_t q_sample = samples[i * 2 + 1];
-                    
-                    // Convert 16-bit to 8-bit by taking upper byte (scale down)
-                    int8_t i8 = static_cast<int8_t>(i_sample >> 8);
-                    int8_t q8 = static_cast<int8_t>(q_sample >> 8);
-                    
-                    converted[out_idx++] = static_cast<uint8_t>(i8);
-                    converted[out_idx++] = static_cast<uint8_t>(q8);
-                    
-                    // Clip detection: values near ±32767 are clipped
-                    if (i_sample < -32000 || i_sample > 32000) clips++;
-                    if (q_sample < -32000 || q_sample > 32000) clips++;
-                }
-                
-                // Count raw bytes from device (4 bytes per complex sample in CS16)
-                total_.fetch_add(actual * 4, std::memory_order_relaxed);
-                
-                if (clips) clipped_.fetch_add(clips, std::memory_order_relaxed);
-                
-                // Push converted 8-bit interleaved IQ data to ring buffer
-                if (!ring_.push(converted.data(), out_idx)) {
-                    dropped_.fetch_add(out_idx, std::memory_order_relaxed);
-                }
-            }
+            actual = device_->readStream(stream_, buffers, requested, flags,
+                                         time_ns, kReadTimeoutUs);
         } catch (const std::exception& e) {
-            // If read fails, sleep and retry
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (running_.load(std::memory_order_acquire))
+                error_ = std::string("SoapySDR readStream: ") + e.what();
+            break;
         }
+        if (actual == SOAPY_SDR_TIMEOUT) continue;
+        if (actual < 0) {
+            if (actual == SOAPY_SDR_OVERFLOW) continue;
+            if (running_.load(std::memory_order_acquire))
+                error_ = "SoapySDR readStream error " + std::to_string(actual);
+            break;
+        }
+        if (actual == 0) continue;
+
+        uint64_t clips = 0;
+        for (int i = 0; i < actual * 2; ++i) {
+            const int16_t sample = samples[static_cast<size_t>(i)];
+            if (std::abs(static_cast<int>(sample)) >= kClipThreshold) ++clips;
+            converted[static_cast<size_t>(i)] =
+                static_cast<uint8_t>(static_cast<int8_t>(sample >> 8));
+        }
+        total_.fetch_add(static_cast<uint64_t>(actual) * 4,
+                         std::memory_order_relaxed);
+        if (clips) clipped_.fetch_add(clips, std::memory_order_relaxed);
+        const size_t bytes = static_cast<size_t>(actual) * 2;
+        if (!ring_.push(converted.data(), bytes))
+            dropped_.fetch_add(bytes, std::memory_order_relaxed);
     }
-    
+    running_.store(false, std::memory_order_release);
+}
+
+size_t SoapySource::read(uint8_t* buf, size_t len) {
+    size_t got = 0;
+    while (got < len && running_.load(std::memory_order_acquire)) {
+        const size_t n = ring_.pop(buf + got, len - got);
+        got += n;
+        if (n == 0) std::this_thread::sleep_for(std::chrono::microseconds(500));
+    }
     return got;
 }
 
 float SoapySource::ring_fill() const {
-    std::lock_guard<std::mutex> lk(mu_);
     return static_cast<float>(ring_.readable()) /
            static_cast<float>(ring_.capacity());
 }
 
 bool SoapySource::set_gains(int lna, int vga) {
-    if (!device_) return false;
-    
-    std::lock_guard<std::mutex> lk(mu_);
-    
-    lna = std::clamp(lna, 0, 40);
-    vga = std::clamp(vga, 0, 62);
-    
-    lna_ = lna;
-    vga_ = vga;
-    
-    // Map to dB and apply to common gain names
-    // B220mini: LNA (0-32 dB), VGA (0-47 dB), RF (25-80 dB)
-    try {
-        auto gain_names = device_->listGains(SOAPY_SDR_RX, 0);
-        
-        for (const auto& name : gain_names) {
-            try {
-                auto range = device_->getGainRange(SOAPY_SDR_RX, 0, name);
-                double db;
-                
-                if (name.find("LNA") != std::string::npos || 
-                    name.find("RF") != std::string::npos) {
-                    // Map 0-40 to range
-                    db = lna * (range.maximum() - range.minimum()) / 40.0 + range.minimum();
-                } else if (name.find("VGA") != std::string::npos) {
-                    // Map 0-62 to range
-                    db = vga * (range.maximum() - range.minimum()) / 62.0 + range.minimum();
-                } else {
-                    // Unknown gain name, skip
-                    continue;
-                }
-                
-                device_->setGain(SOAPY_SDR_RX, 0, name, db);
-            } catch (...) {
-                // Skip gains that fail
-            }
-        }
-    } catch (...) {
-        // No gain names available
-    }
-    
-    return true;
+    std::lock_guard<std::mutex> lock(mu_);
+    return set_gains_locked(lna, vga);
 }
 
 bool SoapySource::set_center_freq(double center_hz) {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!device_) return false;
-    
-    std::lock_guard<std::mutex> lk(mu_);
-    
     try {
-        device_->setFrequency(SOAPY_SDR_RX, 0, center_hz / 1e6, {});
+        device_->setFrequency(SOAPY_SDR_RX, 0, center_hz, {});
         return true;
     } catch (...) {
         return false;

@@ -456,6 +456,61 @@ cmake --build build -j
 - `src/ui/web_display.{hpp,cpp}` — HTTP server using cpp-httplib + libjpeg-turbo
 - `docs/webgui/index.html` — Browser UI template
 
+
+## 9. SDR Backends and Sample Formats
+
+fpvdec currently has three live hardware source paths:
+
+- **HackRF native** — `HackRfSource`, using libhackrf callback input and the
+  existing signed 8-bit interleaved IQ pipeline.
+- **Native UHD** — `UhdSource`, using UHD `sc16` input, converting each complex
+  sample to signed 8-bit IQ, and delivering it through an SPSC ring buffer.
+- **SoapySDR** — `SoapySource`, using SoapySDR `CS16` input, the same signed
+  16-bit-to-8-bit conversion, and a worker/ring-buffer pull interface.
+
+The native UHD path has been tested with an Ettus B210-compatible LibreSDR
+B220mini and produced a clear live decode. The SoapySDR path has also been
+validated with the B220mini through the SoapyUHD module and can be selected
+with the device arguments reported by `SoapySDRUtil --find`.
+
+Build options:
+
+```sh
+./build-only.sh uhd       # native UHD only
+./build-only.sh soapysdr # SoapySDR only
+./build-only.sh all      # SoapySDR + native UHD + Web GUI
+```
+
+Native UHD example:
+
+```sh
+./build/fpvdec --source uhd --channel A1 --uhd-gain 50
+./build/fpvdec --source uhd --uhd-device "addr=192.168.10.2" \
+    --channel A1 --antenna RX2
+```
+
+SoapySDR example using the B220mini:
+
+```sh
+./build/fpvdec --source soapysdr \
+    --device "driver=uhd,serial=H9SA2HE" --channel A1 --gui web
+```
+
+The current DSP boundary consumes signed 8-bit IQ. This is intentional for
+compatibility with HackRF captures and the existing decoder, but it discards
+resolution when a UHD/SoapySDR device supplies `sc16`. Native 16-bit support is
+planned as a separate DSP backend overhaul. The planned design is to make the
+sample type explicit at the source/DSP boundary, add a 16-bit-capable FM
+discriminator and AGC path, and retain the current 8-bit path for replay and
+HackRF compatibility. Other formats such as float32 may be considered later,
+but 16-bit is the practical next target because it can be tested with the
+B220mini.
+
+Sample-format work must preserve the existing file format behavior: `.cs8`
+recordings remain signed interleaved 8-bit IQ, while a future native 16-bit
+capture/replay format should be identified explicitly rather than silently
+interpreted as `.cs8`.
+
 ---
 
 ## 10. Code Style Notes
@@ -489,7 +544,10 @@ cmake --build build -j
 | `fm_detector.hpp` | FM quadrature discriminator |
 | `sync.hpp` | Sync separator + flywheel PLL for line timing |
 | `hackrf_source.cpp` | HackRF One input (10 MSPS, AFC, gain control) |
+| `uhd_source.cpp/.hpp` | Native UHD `sc16` input converted to signed 8-bit IQ |
+| `soapy_source.cpp/.hpp` | SoapySDR `CS16` input converted to signed 8-bit IQ |
 | `file_source.cpp` | .cs8 recording replay input |
+| `sample_source.hpp` | Common pull-based source/HAL interface |
 | `synth_fm.cpp` | E2E test: generates synthetic IQ, decodes, asserts RGB |
 | `fpv_channels.hpp` | 40 standard 5.8 GHz FPV channel frequencies |
 | `spectrum.hpp` | PSD (power spectral density) printing utility |

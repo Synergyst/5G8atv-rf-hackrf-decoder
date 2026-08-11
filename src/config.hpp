@@ -100,11 +100,14 @@ struct Config {
                                // --lna/--vga, or the l/g keys. The RF amp
                                // is never auto-switched (intermod risk).
 
-    enum class Input { HackRF, File, SoapySDR };
+    enum class Input { HackRF, File, SoapySDR, UHD };
     Input input = Input::HackRF;
     std::string file_path;
     bool loop = false;
     std::string soapysdr_device_args;  // device selection for SoapySDR
+    std::string uhd_device_args;       // device selection for native UHD
+    double uhd_gain_db = 45.0;         // aggregate UHD RX gain
+    std::string uhd_antenna;           // optional UHD RX antenna name
 
     enum class Mode { Color, Gray };
     Mode mode = Mode::Color;

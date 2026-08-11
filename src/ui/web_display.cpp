@@ -427,6 +427,7 @@ void WebDisplay::server_thread_func() {
             auto val = parse_value();
             if (!val) return {false, {}};
             key.key = key.str_val;
+            key.is_bool = val->is_bool;
             if (val->is_bool) {
                 key.bool_val = val->bool_val;
             } else {

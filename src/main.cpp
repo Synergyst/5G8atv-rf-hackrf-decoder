@@ -27,6 +27,9 @@
 #include "source/file_source.hpp"
 #include "source/hackrf_source.hpp"
 #include "source/sample_source.hpp"
+#ifdef HAVE_UHD
+#include "source/uhd_source.hpp"
+#endif
 #ifdef HAVE_SOAPYSDR
 #include "source/soapy_source.hpp"
 #endif
@@ -86,9 +89,14 @@ void usage() {
         "  --resolution WxH      output resolution (default 640x480)\n"
         "  --aspect 4:3|16:9|16:10|5:4|custom  aspect ratio preset\n"
 #ifdef HAVE_SOAPYSDR
-        "  --source hackrf|file|soapysdr  input source (default: hackrf)\n"
-        "  --device ARGS         SoapySDR device args (e.g. 'driver=uhd' or\n"
-        "                        'driver=uhd,addr=192.168.10.2')\n"
+        "  --source hackrf|file|soapysdr|uhd  input source (default: hackrf)\n"
+        "  --device ARGS         SoapySDR device args (e.g. 'driver=uhd')\n"
+#endif
+#ifdef HAVE_UHD
+        "  --source uhd          native UHD input source\n"
+        "  --uhd-device ARGS    native UHD device args (e.g. 'addr=192.168.10.2')\n"
+        "  --uhd-gain DB        native UHD aggregate RX gain (default: 45)\n"
+        "  --antenna NAME       native UHD RX antenna name\n"
 #endif
         "  --enforce-clkin       require external CLKIN lock at startup\n"
         "  --no-clkout           disable CLKOUT (default: 10 MHz output on)\n"
@@ -149,13 +157,25 @@ bool parse_args(int argc, char** argv, Config* cfg) {
                 std::fprintf(stderr, "error: SoapySDR support not compiled in\n");
                 return false;
 #endif
+            } else if (v == "uhd") {
+#ifdef HAVE_UHD
+                cfg->input = Config::Input::UHD;
+#else
+                std::fprintf(stderr, "error: native UHD support not compiled in\n");
+                return false;
+#endif
             } else {
-                std::fprintf(stderr, "source must be hackrf|file|soapysdr\n");
+                std::fprintf(stderr, "source must be hackrf|file|soapysdr|uhd\n");
                 return false;
             }
         } else if (a == "--file") { cfg->file_path = next("--file"); cfg->input = Config::Input::File; }
 #ifdef HAVE_SOAPYSDR
         else if (a == "--device") cfg->soapysdr_device_args = next("--device");
+#endif
+#ifdef HAVE_UHD
+        else if (a == "--uhd-device") cfg->uhd_device_args = next("--uhd-device");
+        else if (a == "--uhd-gain") cfg->uhd_gain_db = std::atof(next("--uhd-gain"));
+        else if (a == "--antenna") cfg->uhd_antenna = next("--antenna");
 #endif
         else if (a == "--loop") cfg->loop = true;
         else if (a == "--rate") cfg->sample_rate = std::atof(next("--rate"));
@@ -444,11 +464,23 @@ void dsp_thread(ConfigChangeQueue* events,
                         break;
                     }
                     case CFG_SAMPLE_RATE: {
-                        std::printf("DSP: sample_rate changed to %.1f MSPS, rebuilding filters\n", cfg.sample_rate / 1e6);
-                        fm_det = FmDetector(cfg.sample_rate, fm_dev, invert);
+                        std::printf("DSP: sample_rate event received: %.1f MSPS; rebuilding DSP filters (hardware restart pending)\n", evt.val.dbl_val / 1e6);
+                        fm_det = FmDetector(evt.val.dbl_val, fm_dev, invert);
                         video_lpf_filter = FirFilterF(design_lowpass(
-                            use_video_lpf ? std::min(video_lpf, cfg.sample_rate * 0.45) : 1.0,
-                            cfg.sample_rate, 63));
+                            use_video_lpf ? std::min(video_lpf, evt.val.dbl_val * 0.45) : 1.0,
+                            evt.val.dbl_val, 63));
+                        break;
+                    }
+                    case CFG_AFC: {
+                        std::printf("DSP: AFC=%s (frequency tracking %s)\n",
+                                    evt.val.bool_val ? "enabled" : "disabled",
+                                    evt.val.bool_val ? "active" : "paused");
+                        break;
+                    }
+                    case CFG_SATURATION:
+                    case CFG_HUE_DEG:
+                    case CFG_OVERSCAN: {
+                        std::printf("DSP: video color/crop setting event received; decoder runtime update required\n");
                         break;
                     }
                     default: break;
@@ -506,6 +538,9 @@ int main(int argc, char** argv) {
 #ifdef HAVE_SOAPYSDR
     SoapySource* soapysdr = nullptr;
 #endif
+#ifdef HAVE_UHD
+    UhdSource* uhd = nullptr;
+#endif
     
     if (cfg.input == Config::Input::HackRF) {
         auto h = std::make_unique<HackRfSource>(cfg);
@@ -516,6 +551,12 @@ int main(int argc, char** argv) {
         auto s = std::make_unique<SoapySource>(cfg, cfg.soapysdr_device_args);
         soapysdr = s.get();
         src = std::move(s);
+#endif
+#ifdef HAVE_UHD
+    } else if (cfg.input == Config::Input::UHD) {
+        auto u = std::make_unique<UhdSource>(cfg);
+        uhd = u.get();
+        src = std::move(u);
 #endif
     } else {
         src = std::make_unique<FileSource>(cfg, !cfg.headless && !cfg.spectrum);
@@ -541,10 +582,15 @@ int main(int argc, char** argv) {
     else if (cfg.input == Config::Input::SoapySDR) {
         source_name = "SoapySDR";
         if (soapysdr) source_name += " (" + soapysdr->device_info() + ")";
+    } else if (cfg.input == Config::Input::UHD) {
+        source_name = "UHD";
+        if (uhd) source_name += " (" + uhd->device_info() + ")";
     } else source_name = cfg.file_path;
     std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", source_name.c_str(), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
 #else
-    std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", cfg.input == Config::Input::HackRF ? "HackRF" : cfg.file_path.c_str(), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
+    const char* input_name = cfg.input == Config::Input::HackRF ? "HackRF" :
+                             (cfg.input == Config::Input::UHD ? "UHD" : cfg.file_path.c_str());
+    std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", input_name, cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
 #endif
 
     if (cfg.spectrum) {

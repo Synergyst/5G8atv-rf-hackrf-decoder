@@ -11,9 +11,12 @@ if [ -n "$1" ] && [ "$1" = "webgui" ]; then
 elif [ -n "$1" ] && [ "$1" = "soapysdr" ]; then
     echo "=== Compiling with SoapySDR (soapysdr) ==="
     cmake -B build -DCMAKE_BUILD_TYPE=Release -DSOAPYSDR=ON && cmake --build build -j4
+elif [ -n "$1" ] && [ "$1" = "uhd" ]; then
+    echo "=== Compiling with native UHD (uhd) ==="
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DUHD=ON && cmake --build build -j4
 elif [ -n "$1" ] && [ "$1" = "all" ]; then
     echo "=== Compiling with SoapySDR and WebUI (all) ==="
-    cmake -B build -DCMAKE_BUILD_TYPE=Release -DSOAPYSDR=ON -DWEBGUI=ON && cmake --build build -j4
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DSOAPYSDR=ON -DUHD=ON -DWEBGUI=ON && cmake --build build -j4
 else
     echo "=== Compiling without SoapySDR nor WebUI support (default) ==="
     cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
