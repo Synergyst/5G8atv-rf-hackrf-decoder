@@ -64,6 +64,7 @@ void usage() {
         "  --rate HZ             sample rate (default 10e6). Lower = less CPU:\n"
         "                        8e6 keeps coarse color, <=7e6 grayscale,\n"
         "                        ~6e6 practical minimum (use whole MHz)\n"
+        "  --bits 8|16           IQ sample width for UHD/SoapySDR (default 8)\n"
         "  --offset HZ           tuning offset above carrier (default 0)\n"
         "  --gain auto|manual    RF gain control (default auto)\n"
         "  --lna N --vga N       gain settings (imply --gain manual)\n"
@@ -179,6 +180,12 @@ bool parse_args(int argc, char** argv, Config* cfg) {
 #endif
         else if (a == "--loop") cfg->loop = true;
         else if (a == "--rate") cfg->sample_rate = std::atof(next("--rate"));
+        else if (a == "--bits") {
+            cfg->sample_bits = std::atoi(next("--bits"));
+            if (cfg->sample_bits != 8 && cfg->sample_bits != 16) {
+                std::fprintf(stderr, "--bits must be 8 or 16\n"); return false;
+            }
+        }
         else if (a == "--offset") cfg->offset_hz = std::atof(next("--offset"));
         else if (a == "--lna") { cfg->lna_gain = std::atoi(next("--lna")); cfg->gain_auto = false; }
         else if (a == "--vga") { cfg->vga_gain = std::atoi(next("--vga")); cfg->gain_auto = false; }
@@ -421,6 +428,7 @@ void dsp_thread(ConfigChangeQueue* events,
                 const Config& cfg, ISampleSource* src, NtscDecoder* dec,
                 Recorder* rec, std::atomic<float>* mean_raw) {
     constexpr size_t kBlockBytes = 1 << 16;
+    const size_t bytes_per_sample = src->sample_format() == SampleFormat::CS16 ? 4 : 2;
     std::vector<uint8_t> raw(kBlockBytes);
     std::vector<std::complex<float>> iq(kBlockBytes / 2);
     std::vector<float> comp(kBlockBytes / 2);
@@ -488,13 +496,21 @@ void dsp_thread(ConfigChangeQueue* events,
             }
         }
 
-        size_t n = src->read(raw.data(), raw.size());
+        size_t n = src->read(raw.data(), raw.size() - (raw.size() % bytes_per_sample));
         if (n == 0) break;
         rec->write(raw.data(), n);
-        size_t ns = n / 2;
-        for (size_t i = 0; i < ns; ++i) {
-            std::complex<float> c(static_cast<int8_t>(raw[2 * i]) / 128.0f, static_cast<int8_t>(raw[2 * i + 1]) / 128.0f);
-            iq[i] = dcb.process(c);
+        size_t ns = n / bytes_per_sample;
+        if (src->sample_format() == SampleFormat::CS16) {
+            const auto* samples = reinterpret_cast<const int16_t*>(raw.data());
+            for (size_t i = 0; i < ns; ++i) {
+                std::complex<float> c(samples[2 * i] / 32768.0f, samples[2 * i + 1] / 32768.0f);
+                iq[i] = dcb.process(c);
+            }
+        } else {
+            for (size_t i = 0; i < ns; ++i) {
+                std::complex<float> c(static_cast<int8_t>(raw[2 * i]) / 128.0f, static_cast<int8_t>(raw[2 * i + 1]) / 128.0f);
+                iq[i] = dcb.process(c);
+            }
         }
         if (offset_hz != 0.0) for (size_t i = 0; i < ns; ++i) iq[i] *= mixer.next();
         chan_lpf.process(iq.data(), iq.data(), ns);
@@ -565,6 +581,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "failed to start input source: %s\n", src->error().c_str());
         return 1;
     }
+    if (cfg.sample_bits == 16 && src->sample_format() != SampleFormat::CS16) {
+        std::fprintf(stderr, "error: --bits 16 is only supported by UHD/SoapySDR sources; this source provides %s\n",
+                     sample_format_name(src->sample_format()));
+        src->stop();
+        return 2;
+    }
     // CLKIN check: if enforcement is requested, verify external clock is locked
     if (cfg.enforce_clkin && hackrf && !hackrf->check_clkin()) {
         std::fprintf(stderr, "ERROR: --enforce-clkin requires external CLKIN lock. "
@@ -586,11 +608,11 @@ int main(int argc, char** argv) {
         source_name = "UHD";
         if (uhd) source_name += " (" + uhd->device_info() + ")";
     } else source_name = cfg.file_path;
-    std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", source_name.c_str(), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
+    std::printf("input: %s   format %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", source_name.c_str(), sample_format_name(src->sample_format()), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
 #else
     const char* input_name = cfg.input == Config::Input::HackRF ? "HackRF" :
                              (cfg.input == Config::Input::UHD ? "UHD" : cfg.file_path.c_str());
-    std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", input_name, cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
+    std::printf("input: %s   format %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", input_name, sample_format_name(src->sample_format()), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
 #endif
 
     if (cfg.spectrum) {

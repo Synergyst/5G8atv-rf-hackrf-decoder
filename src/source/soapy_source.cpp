@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -21,6 +22,7 @@ constexpr int16_t kClipThreshold = 32000;
 
 SoapySource::SoapySource(const Config& cfg, const std::string& device_args)
     : cfg_(cfg), device_args_(device_args), ring_(kRingBytes),
+      format_(cfg.sample_bits == 16 ? SampleFormat::CS16 : SampleFormat::CS8),
       lna_(cfg.lna_gain), vga_(cfg.vga_gain) {}
 
 SoapySource::~SoapySource() { stop(); }
@@ -182,6 +184,7 @@ void SoapySource::resume() {
 void SoapySource::rx_loop() {
     std::vector<int16_t> samples(kReadBatchSamples * 2);
     std::vector<uint8_t> converted(kReadBatchSamples * 2);
+    std::vector<uint8_t> raw16(kReadBatchSamples * 4);
     while (running_.load(std::memory_order_acquire)) {
         void* buffers[] = {samples.data()};
         size_t requested = kReadBatchSamples;
@@ -211,12 +214,15 @@ void SoapySource::rx_loop() {
             if (std::abs(static_cast<int>(sample)) >= kClipThreshold) ++clips;
             converted[static_cast<size_t>(i)] =
                 static_cast<uint8_t>(static_cast<int8_t>(sample >> 8));
+            std::memcpy(raw16.data() + static_cast<size_t>(i) * sizeof(int16_t),
+                        &sample, sizeof(sample));
         }
         total_.fetch_add(static_cast<uint64_t>(actual) * 4,
                          std::memory_order_relaxed);
         if (clips) clipped_.fetch_add(clips, std::memory_order_relaxed);
-        const size_t bytes = static_cast<size_t>(actual) * 2;
-        if (!ring_.push(converted.data(), bytes))
+        const size_t bytes = static_cast<size_t>(actual) * (format_ == SampleFormat::CS16 ? 4 : 2);
+        const uint8_t* output = format_ == SampleFormat::CS16 ? raw16.data() : converted.data();
+        if (!ring_.push(output, bytes))
             dropped_.fetch_add(bytes, std::memory_order_relaxed);
     }
     running_.store(false, std::memory_order_release);

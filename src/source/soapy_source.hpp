@@ -40,6 +40,7 @@ public:
         return clipped_.load(std::memory_order_relaxed);
     }
     float ring_fill() const override;
+    SampleFormat sample_format() const override { return format_; }
 
     bool set_gains(int lna, int vga) override;
     bool set_center_freq(double center_hz) override;
@@ -61,6 +62,7 @@ private:
     SoapySDR::Device* device_ = nullptr;
     SoapySDR::Stream* stream_ = nullptr;
     SpscRing ring_;
+    SampleFormat format_ = SampleFormat::CS8;
 
     std::atomic<uint64_t> dropped_{0};
     std::atomic<uint64_t> total_{0};

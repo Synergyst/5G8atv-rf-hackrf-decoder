@@ -5,6 +5,7 @@
 #include <cmath>
 #include <complex>
 #include <iostream>
+#include <cstring>
 #include <vector>
 
 namespace famidec {
@@ -15,7 +16,7 @@ constexpr double kSc16Clip = 32000.0;
 }
 
 UhdSource::UhdSource(const Config& cfg)
-    : cfg_(cfg), ring_(kRingBytes), uhd_gain_(cfg.uhd_gain_db) {}
+    : cfg_(cfg), ring_(kRingBytes), format_(cfg.sample_bits == 16 ? SampleFormat::CS16 : SampleFormat::CS8), uhd_gain_(cfg.uhd_gain_db) {}
 
 UhdSource::~UhdSource() { stop(); }
 
@@ -82,6 +83,7 @@ void UhdSource::rx_loop() {
     const size_t spb = rx_streamer_->get_max_num_samps();
     std::vector<int16_t> sc16(spb * 2);
     std::vector<uint8_t> sc8(spb * 2);
+    std::vector<uint8_t> sc16_bytes(spb * 4);
     uhd::rx_metadata_t md;
 
     try {
@@ -109,8 +111,13 @@ void UhdSource::rx_loop() {
             }
             total_.fetch_add(n * 4, std::memory_order_relaxed);
             if (clips) clipped_.fetch_add(clips, std::memory_order_relaxed);
-            if (!ring_.push(sc8.data(), n * 2))
+            if (format_ == SampleFormat::CS16) {
+                std::memcpy(sc16_bytes.data(), sc16.data(), n * 4);
+                if (!ring_.push(sc16_bytes.data(), n * 4))
+                    dropped_.fetch_add(n * 4, std::memory_order_relaxed);
+            } else if (!ring_.push(sc8.data(), n * 2)) {
                 dropped_.fetch_add(n * 2, std::memory_order_relaxed);
+            }
         }
 
         if (rx_streamer_) {

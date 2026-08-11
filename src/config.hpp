@@ -85,6 +85,7 @@ struct Config {
     // RF
     double video_carrier_hz = 5.800e9;  // 5.8 GHz FPV band F, channel 4
     double sample_rate = 10e6;          // FPV FM video fits in +-4.5 MHz
+    int sample_bits = 8;                // DSP/source IQ width: 8 or 16 bits
                                         // (measured: <0.3% energy outside);
                                         // halves CPU and USB load vs 20 MSPS
     double offset_hz = 0.0;             // no offset tuning: DC spike removed by

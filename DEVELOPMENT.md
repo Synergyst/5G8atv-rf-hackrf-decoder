@@ -463,15 +463,18 @@ fpvdec currently has three live hardware source paths:
 
 - **HackRF native** — `HackRfSource`, using libhackrf callback input and the
   existing signed 8-bit interleaved IQ pipeline.
-- **Native UHD** — `UhdSource`, using UHD `sc16` input, converting each complex
-  sample to signed 8-bit IQ, and delivering it through an SPSC ring buffer.
-- **SoapySDR** — `SoapySource`, using SoapySDR `CS16` input, the same signed
-  16-bit-to-8-bit conversion, and a worker/ring-buffer pull interface.
+- **Native UHD** — `UhdSource`, using UHD `sc16` input and delivering either
+  native CS16 or converted CS8 through an SPSC ring buffer. `--bits 16` keeps
+  the native samples; `--bits 8` performs the compatibility conversion.
+- **SoapySDR** — `SoapySource`, using SoapySDR `CS16` input and delivering
+  either native CS16 or converted CS8 through a worker/ring-buffer interface.
+  This has been tested with the B220mini through SoapyUHD and with HackRF
+  through SoapyHackRF.
 
 The native UHD path has been tested with an Ettus B210-compatible LibreSDR
 B220mini and produced a clear live decode. The SoapySDR path has also been
-validated with the B220mini through the SoapyUHD module and can be selected
-with the device arguments reported by `SoapySDRUtil --find`.
+validated with the B220mini through the SoapyUHD module and with HackRF through
+SoapyHackRF. Device arguments should be taken from `SoapySDRUtil --find`.
 
 Build options:
 
@@ -496,15 +499,31 @@ SoapySDR example using the B220mini:
     --device "driver=uhd,serial=H9SA2HE" --channel A1 --gui web
 ```
 
-The current DSP boundary consumes signed 8-bit IQ. This is intentional for
-compatibility with HackRF captures and the existing decoder, but it discards
-resolution when a UHD/SoapySDR device supplies `sc16`. Native 16-bit support is
-planned as a separate DSP backend overhaul. The planned design is to make the
-sample type explicit at the source/DSP boundary, add a 16-bit-capable FM
-discriminator and AGC path, and retain the current 8-bit path for replay and
-HackRF compatibility. Other formats such as float32 may be considered later,
-but 16-bit is the practical next target because it can be tested with the
-B220mini.
+The source/DSP boundary now exposes an explicit `SampleFormat` (`CS8` or
+`CS16`). `--bits 8|16` selects the requested format for native UHD and
+SoapySDR. HackRF and `.cs8` replay remain CS8. UHD and SoapySDR deliver native
+CS16 when `--bits 16` is selected; the DSP converts those samples directly to
+normalized floating-point complex samples instead of first truncating them to
+CS8. The FM detector and NTSC decoder continue to consume normalized float
+samples, so the existing DSP kernels remain shared by both input widths.
+
+The expected test matrix is:
+
+```sh
+# CS8 compatibility paths
+./build/fpvdec --source hackrf --bits 8 --channel A1
+./build/fpvdec --source uhd --bits 8 --channel A1
+./build/fpvdec --source soapysdr --bits 8 --device "driver=uhd,serial=H9SA2HE" --channel A1
+
+# CS16 paths; tested with the B220mini/B210-compatible device
+./build/fpvdec --source uhd --bits 16 --uhd-gain 50 --channel A1
+./build/fpvdec --source soapysdr --bits 16 \
+    --device "driver=uhd,serial=H9SA2HE" --channel A1
+```
+
+Native 16-bit HackRF input is not a target: HackRF remains a CS8 source.
+Future CF32 support may be added if a backend benefits from it, but CS16 is
+currently the practical precision target.
 
 Sample-format work must preserve the existing file format behavior: `.cs8`
 recordings remain signed interleaved 8-bit IQ, while a future native 16-bit

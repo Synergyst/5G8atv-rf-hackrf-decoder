@@ -42,6 +42,7 @@ public:
         return clipped_.load(std::memory_order_relaxed);
     }
     float ring_fill() const override;
+    SampleFormat sample_format() const override { return format_; }
 
     bool set_center_freq(double center_hz) override;
     bool set_gains(int lna, int vga) override;
@@ -57,6 +58,7 @@ private:
     uhd::usrp::multi_usrp::sptr usrp_;
     uhd::rx_streamer::sptr rx_streamer_;
     SpscRing ring_;
+    SampleFormat format_ = SampleFormat::CS16;
 
     std::atomic<uint64_t> dropped_{0};
     std::atomic<uint64_t> total_{0};

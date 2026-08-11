@@ -91,7 +91,7 @@ warming up (real units drift ~1 MHz in the first minutes).
 
 ## Interface
 
-fpvdec ships with **two graphical interfaces** selectable at startup:
+fpvdec ships with **three output interfaces** selectable at startup:
 
 ### ImGui Mode (default)
 
@@ -148,7 +148,9 @@ No SDL/Display/OpenGL required — runs on headless servers.
 | `/` | Browser UI (video canvas, stats panel, controls) |
 | `/api/frame` | Latest decoded frame as JPEG |
 | `/api/stats` | Decoder stats as JSON (sync, fps, AGC, clipping) |
-| `/api/set` | POST form data to change config (key/value pairs) |
+| `/api/config` | Current configuration snapshot as JSON |
+| `/api/config/set` | POST JSON configuration changes |
+| `/api/set` | Legacy POST form data to change config (key/value pairs) |
 
 ```sh
 cmake -B build -DWEBGUI=ON
@@ -164,6 +166,8 @@ cmake --build build
 - Control panel for channel selection, gain (LNA/VGA), RF amp toggle
 - All existing flags work: `--denoise`, `--auto-res`, `--record`, etc.
 - AFC and AGC operate normally (same as SDL mode)
+- Configuration changes are validated, applied to the live control path, and read back by the browser
+- CS8/CS16 source selection is available through `--bits`
 - Ctrl+C to stop the server
 
 ## Hardware
@@ -180,9 +184,10 @@ The +14 dB RF amp is enabled by default (`--no-amp` to disable).
 
 fpvdec supports **SoapySDR-compatible SDRs** for broader hardware support. This includes the
 [LibreSDR B220mini](https://libresdr.org/) (USRP B210 compatible), LimeSDR, USRP B-series,
-and other SoapySDR devices.
+HackRF through SoapyHackRF, and other SoapySDR devices. The SoapySDR backend has now been
+hardware-tested with both the LibreSDR B220mini and HackRF.
 
-**Supported devices (via SoapySDR):**
+**Tested devices (via SoapySDR):**
 
 | Device | Notes |
 |---|---|
@@ -197,28 +202,35 @@ and other SoapySDR devices.
 # List available devices
 # (SoapySDRUtil --info)
 
-# Use LibreSDR B220mini (USRP device)
-./build/fpvdec --source soapysdr --device "driver=uhd"
+# Discover devices and available factories
+SoapySDRUtil --info
+SoapySDRUtil --find
 
-# Specify IP address for networked USRP
-./build/fpvdec --source soapysdr --device "driver=uhd,addr=192.168.10.2"
+# Use LibreSDR B220mini through SoapyUHD
+./build/fpvdec --source soapysdr \
+  --device "driver=uhd,serial=H9SA2HE" --channel A1
 
-# Use with specific serial number
-./build/fpvdec --source soapysdr --device "driver=uhd,serial=xxxxxx"
+# Specify an IP address for a networked UHD device
+./build/fpvdec --source soapysdr \
+  --device "driver=uhd,addr=192.168.10.2" --channel A1
+
+# Use a HackRF through SoapyHackRF
+./build/fpvdec --source soapysdr \
+  --device "driver=hackrf,serial=SERIAL" --channel A1
 ```
 
-**Note:** When using SoapySDR mode, HackRF-specific options like `--no-amp`,
-`--enforce-clkin`, and `--no-clkout` may not be applicable, as gain control
-and clocking are device-dependent.
+**Note:** SoapySDR device capabilities vary by driver. HackRF-specific options such as
+`--no-amp`, `--enforce-clkin`, and `--no-clkout` may not apply to non-HackRF devices.
+The generic LNA/VGA controls are best-effort mappings for devices that expose named gain
+stages; use the device's native gain controls when a driver does not expose those stages.
 
 ## Native UHD and SoapySDR sources
 
 fpvdec also has a native UHD source for UHD-compatible radios such as the
-Ettus B200/B210 and LibreSDR B220mini. This path was tested on a B210 and
-produced a clear live decode; UHD receives native `sc16` samples and the
-source converts them to the signed 8-bit interleaved IQ format currently used
-by the fpvdec DSP. One initial UHD USB overrun was observed while the GUI was
-opening on an older Dell system; this did not persist during decoding.
+Ettus B200/B210 and LibreSDR B220mini. The native UHD path was tested on a
+B210-compatible LibreSDR B220mini and produced a clear live decode. A single
+USB overrun (`O`) appeared while the GUI was opening on an older Dell system;
+it did not persist during decoding and is expected on a busy/older host.
 
 Build native UHD support with:
 
@@ -235,13 +247,12 @@ for example:
   --uhd-gain 50 --channel A1
 ```
 
-SoapySDR support is also available through `--source soapysdr`. The backend
-uses a worker thread and ring buffer, receives `CS16`, converts it to the
-signed 8-bit interleaved IQ format used by the current DSP, and handles stream
-timeouts/overruns. It has been tested with the LibreSDR B220mini through the
-UHD SoapySDR module and is suitable for user testing. Device capabilities and
-gain names vary by driver, so the reported gain controls are necessarily
-best-effort.
+SoapySDR support is also available through `--source soapysdr`. The backend uses a
+worker thread and ring buffer, handles stream timeouts/overruns, and supports both
+CS8 and CS16 input selection. It was tested with the B220mini through the UHD SoapySDR
+module and with HackRF through SoapyHackRF. When HackRF is used through SoapySDR,
+selecting `--bits 16` can exercise the CS16 transport/conversion path, but it cannot
+create additional RF precision: the physical HackRF ADC remains an 8-bit source.
 
 Build all optional backends and the Web GUI with:
 
@@ -265,9 +276,51 @@ Example using a HackRF through SoapyHackRF:
   --channel A1 --gui web
 ```
 
-The current DSP accepts signed 8-bit IQ. Native 16-bit support is intentionally
-planned for a later stage because it requires a wider DSP/AGC and sample-format
-rework rather than only a source-driver change.
+## Sample formats and verified backend matrix
+
+The DSP accepts normalized complex samples from two explicit source formats:
+
+- **CS8** — signed interleaved 8-bit I/Q, the native HackRF and `.cs8` format.
+- **CS16** — signed interleaved 16-bit I/Q, available from native UHD and SoapySDR.
+
+Select the requested source format with `--bits 8` or `--bits 16`; the default is `8`.
+The FM detector and NTSC decoder share the same normalized floating-point processing
+path after input conversion. CS16 therefore avoids throwing away the extra source
+resolution before normalization, without duplicating the whole downstream DSP chain.
+
+The tested matrix is:
+
+| Backend | CS8 | CS16 | Hardware result |
+|---|---:|---:|---|
+| Native HackRF | Tested | Not supported | Working; HackRF remains an 8-bit source |
+| Native UHD | Tested | Tested | Working with LibreSDR B220mini/B210-compatible hardware |
+| SoapySDR + UHD driver | Tested | Tested | Working with LibreSDR B220mini/B210-compatible hardware |
+| SoapySDR + HackRF driver | Tested | Tested transport path | Working; `--bits 16` cannot add precision beyond HackRF's 8-bit ADC |
+| `.cs8` file replay | Tested | Not applicable | Existing signed interleaved 8-bit capture format |
+
+Examples:
+
+```sh
+# Native HackRF: CS8
+./build/fpvdec --source hackrf --bits 8 --channel A1
+
+# Native UHD: CS8 compatibility mode
+./build/fpvdec --source uhd --bits 8 --channel A1 --uhd-gain 50
+
+# Native UHD: preserve CS16 into the DSP
+./build/fpvdec --source uhd --bits 16 --channel A1 --uhd-gain 50
+
+# SoapyUHD: preserve CS16 into the DSP
+./build/fpvdec --source soapysdr --bits 16 \
+  --device "driver=uhd,serial=H9SA2HE" --channel A1
+
+# SoapyHackRF: hardware is still physically 8-bit
+./build/fpvdec --source soapysdr --bits 8 \
+  --device "driver=hackrf,serial=SERIAL" --channel A1
+```
+
+A future native 16-bit capture/replay file format must be identified explicitly;
+`.cs8` files will continue to mean signed interleaved 8-bit IQ.
 
 ## Build
 
@@ -287,8 +340,12 @@ cmake --build build --config Release
 ### macOS / Linux
 
 ```sh
-brew install hackrf sdl2 cmake pkg-config   # or apt equivalents
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+# Core/native HackRF build
+sudo apt install hackrf libhackrf-dev libsdl2-dev cmake pkg-config
+
+# Optional backends and Web GUI
+sudo apt install libuhd-dev uhd-host libsoapysdr-dev soapysdr-tools
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DSOAPYSDR=ON -DUHD=ON -DWEBGUI=ON
 cmake --build build -j
 ```
 
@@ -345,6 +402,7 @@ cmake --build build -j
 | `--lna N` / `--vga N` | fixed gains, imply `--gain manual` |
 | `--no-amp` | disable the +14 dB RF preamp (default on) |
 | `--rate HZ` | sample rate (default 10e6; 8e6 keeps coarse color, ≤7e6 grayscale, ~6e6 minimum) |
+| `--bits 8\|16` | IQ width for UHD/SoapySDR (default 8; native HackRF and `.cs8` are CS8) |
 | `--lpf HZ` | optional post-detector video LPF, e.g. 4.2e6 |
 | `--mode color\|gray` | decode mode (default color) |
 | `--sat F` / `--hue DEG` | color trims |
@@ -357,7 +415,7 @@ cmake --build build -j
 | `--dump-frames PREFIX` / `--frames N` | headless PPM frame dump |
 | `--dump-composite PATH` | dump post-AGC composite as f32 (debug) |
 | `--spectrum` | print PSD and exit |
-| `--gui imgui\|sdl` | GUI mode: **imgui** (default, floating control panel, no hotkeys) or **sdl** (legacy hotkeys for testing) |
+| `--gui imgui\|sdl\|web` | GUI mode: ImGui (default), SDL legacy window, or Web headless server |
 | `--resolution WxH` | output resolution (default 640×480) |
 | `--aspect 4:3\|16:9\|16:10\|5:4` | aspect ratio preset (default: use resolution dimensions) |
 | `--auto-res` | auto-detect signal standard and suggest resolution |
@@ -428,7 +486,8 @@ The decoder reports CLKIN lock status in the overlay ("CLKIN: LOCKED" or "CLKIN:
 ## How it works
 
 ```
-HackRF One (10 MSPS, tuned to the channel; AFC re-centers on the VTX)
+HackRF / UHD / SoapySDR source
+  → CS8 or CS16 normalization to complex float
   → complex DC blocker
   → 4.9 MHz complex channel LPF (flat through the chroma upper sideband)
   → FM quadrature discriminator (AVX2; sync-tip-positive polarity)
@@ -515,6 +574,8 @@ Examples:
 ```sh
 ./test.sh                    # build + golden test + long-run test + replay
 ./test.sh soapysdr           # build with SoapySDR support
+./test.sh uhd                # build with native UHD support
+./test.sh all                # build with SoapySDR + UHD + Web GUI
 ```
 
 ## Troubleshooting
@@ -526,6 +587,8 @@ Examples:
 | Weak / sparkly at range | use a circular-polarized 5.8 GHz antenna; keep the RF amp on |
 | Distorted up close | auto gain backs off, but very close in also toggle the amp off (`b`) |
 | No color | signal too weak for burst detection, or `--rate` below 8 MSPS |
+| `--bits 16` rejected | 16-bit input is only available from UHD/SoapySDR; HackRF and `.cs8` are CS8 |
+| CS16 looks no better through SoapyHackRF | The HackRF hardware is still an 8-bit ADC; use native UHD/SoapyUHD with the B220mini for real CS16 precision |
 | Video latency climbing | CPU can't keep up — lower `--rate` (8e6 / 6e6) |
 | Stretched/distorted image | Use `--aspect 4:3` for standard, `--resolution` to match your display |
 
