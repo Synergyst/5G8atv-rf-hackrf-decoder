@@ -2,8 +2,7 @@
 
 cd /home/dragonos/Sources/5G8atv-rf-hackrf-decoder
 
-#cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DSOAPYSDR=ON -DWEBGUI=ON && cmake --build build -j4
+./build-only.sh all
 
 #./build/fpvdec --no-amp --vga 34 --rate 10e6 --offset -160000 --gain auto --channel A1
 #./build/fpvdec --no-amp --vga 34 --rate 10e6 --gain auto --freq 5865000000

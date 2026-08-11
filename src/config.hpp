@@ -197,9 +197,7 @@ struct Config {
     // the SDL/ImGui layer.
     bool debug_mode = false;
     int debug_duration_sec = 0;  // 0 = infinite, >0 = auto-exit after N seconds
-}
-
-double center_hz() const { return video_carrier_hz + offset_hz; }
+    double center_hz() const { return video_carrier_hz + offset_hz; }
 };
 
 }  // namespace famidec
