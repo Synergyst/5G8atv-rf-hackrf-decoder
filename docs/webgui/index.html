@@ -872,11 +872,12 @@
           clkout: true,
           enforce_clkin: false
         };
-        fetch(`${BASE}/api/config/set`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(defaults)
-        }).then(() => fetchConfig()).catch(() => showToast('Reset failed'));
+        fetch(`${BASE}/api/config/reset`, {
+          method: 'POST'
+        }).then(r => r.json()).then(() => {
+          showToast('Restarting with startup configuration...');
+          setTimeout(fetchConfig, 1000);
+        }).catch(() => showToast('Reset failed'));
       };
 
       // Initial load

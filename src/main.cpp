@@ -355,6 +355,7 @@ void write_ppm(const Frame& f, const std::string& path) {
 }
 
 std::atomic<bool> g_running{true};
+std::atomic<bool> g_restart_requested{false};
 
 class Recorder {
 public:
@@ -457,13 +458,15 @@ void dsp_thread(ConfigChangeQueue* events,
                     case CFG_FM_DEV: {
                         fm_dev = evt.val.dbl_val;
                         fm_det = FmDetector(sample_rate, fm_dev, invert);
-                        std::printf("DSP: fm_dev=%.1f MHz\n", fm_dev / 1e6);
+                        std::printf("DSP: fm_dev=%.1f MHz; requesting full application reinitialization\n", fm_dev / 1e6);
+                        g_restart_requested.store(true, std::memory_order_release);
                         break;
                     }
                     case CFG_INVERT: {
                         invert = evt.val.bool_val;
                         fm_det = FmDetector(sample_rate, fm_dev, invert);
-                        std::printf("DSP: invert=%s\n", invert ? "true" : "false");
+                        std::printf("DSP: invert=%s; requesting full application reinitialization\n", invert ? "true" : "false");
+                        g_restart_requested.store(true, std::memory_order_release);
                         break;
                     }
                     case CFG_VIDEO_LPF: {
@@ -472,17 +475,13 @@ void dsp_thread(ConfigChangeQueue* events,
                         video_lpf_filter = FirFilterF(design_lowpass(
                             use_video_lpf ? std::min(video_lpf, sample_rate * 0.45) : 1.0,
                             sample_rate, 63));
-                        std::printf("DSP: video_lpf=%.1f MHz\n", video_lpf / 1e6);
+                        std::printf("DSP: video_lpf=%.1f MHz; requesting full application reinitialization\n", video_lpf / 1e6);
+                        g_restart_requested.store(true, std::memory_order_release);
                         break;
                     }
                     case CFG_SAMPLE_BITS:
-                        std::printf("DSP: sample_bits=%d; restarting source\n", evt.val.int_val);
-                        if (src->restart()) {
-                            bytes_per_sample = src->sample_format() == SampleFormat::CS16 ? 4 : 2;
-                            std::printf("DSP: source restarted in %s\n", sample_format_name(src->sample_format()));
-                        } else {
-                            std::fprintf(stderr, "DSP: source restart failed: %s\n", src->error().c_str());
-                        }
+                        std::printf("DSP: sample_bits=%d; requesting full application reinitialization\n", evt.val.int_val);
+                        g_restart_requested.store(true, std::memory_order_release);
                         break;
                     case CFG_SAMPLE_RATE: {
                         sample_rate = std::clamp(evt.val.dbl_val, 6e6, 20e6);
@@ -494,18 +493,15 @@ void dsp_thread(ConfigChangeQueue* events,
                         video_lpf_filter = FirFilterF(design_lowpass(
                             use_video_lpf ? std::min(video_lpf, sample_rate * 0.45) : 1.0,
                             sample_rate, 63));
-                        if (src->restart()) {
-                            bytes_per_sample = src->sample_format() == SampleFormat::CS16 ? 4 : 2;
-                            std::printf("DSP: source restarted at %.1f MSPS\n", evt.val.dbl_val / 1e6);
-                        } else {
-                            std::fprintf(stderr, "DSP: source restart failed: %s\n", src->error().c_str());
-                        }
+                        std::printf("DSP: requesting full application reinitialization for sample-rate change\n");
+                        g_restart_requested.store(true, std::memory_order_release);
                         break;
                     }
                     case CFG_OFFSET_HZ:
                         offset_hz = evt.val.dbl_val;
                         mixer.set_freq(offset_hz, sample_rate);
-                        std::printf("DSP: offset_hz=%.0f applied\n", offset_hz);
+                        std::printf("DSP: offset_hz=%.0f; requesting full application reinitialization\n", offset_hz);
+                        g_restart_requested.store(true, std::memory_order_release);
                         break;
                     case CFG_GAIN_AUTO:
                         std::printf("DSP: gain mode=%s\n", evt.val.bool_val ? "auto" : "manual");
@@ -521,19 +517,23 @@ void dsp_thread(ConfigChangeQueue* events,
                     }
                     case CFG_SATURATION:
                         dec->set_saturation(evt.val.flt_val);
-                        std::printf("DSP: saturation=%.2f applied\n", evt.val.flt_val);
+                        std::printf("DSP: saturation=%.2f; requesting full application reinitialization\n", evt.val.flt_val);
+                        g_restart_requested.store(true, std::memory_order_release);
                         break;
                     case CFG_HUE_DEG:
                         dec->set_hue_deg(evt.val.flt_val);
-                        std::printf("DSP: hue_deg=%.1f applied\n", evt.val.flt_val);
+                        std::printf("DSP: hue_deg=%.1f; requesting full application reinitialization\n", evt.val.flt_val);
+                        g_restart_requested.store(true, std::memory_order_release);
                         break;
                     case CFG_OVERSCAN:
                         dec->set_overscan(evt.val.flt_val);
-                        std::printf("DSP: overscan=%.3f applied\n", evt.val.flt_val);
+                        std::printf("DSP: overscan=%.3f; requesting full application reinitialization\n", evt.val.flt_val);
+                        g_restart_requested.store(true, std::memory_order_release);
                         break;
                     case CFG_FRAME_WIDTH:
                     case CFG_FRAME_HEIGHT:
-                        std::printf("DSP: resolution change queued; coordinated restart required\n");
+                        std::printf("DSP: resolution change queued; requesting full application reinitialization\n");
+                        g_restart_requested.store(true, std::memory_order_release);
                         break;
                     default: break;
                 }
@@ -586,27 +586,7 @@ int run_spectrum(const Config& cfg, ISampleSource* src) {
 
 } // namespace
 
-int main(int argc, char** argv) {
-    Config defaults;
-    Config cfg = defaults;
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (std::string(argv[i]) == "--config") cfg.config_path = argv[i + 1];
-    }
-    load_config_file(cfg, cfg.config_path);
-    if (!parse_args(argc, argv, &cfg)) {
-        usage();
-        return 2;
-    }
-    // CLI values are applied after persisted values and therefore act as
-    // startup overrides. Persist the resulting startup configuration so the
-    // Web UI and the next run see the effective values.
-    save_config_file(cfg, cfg.config_path);
-    // Reset means built-in defaults plus explicit CLI overrides, not persisted
-    // Web UI values. Parse the CLI a second time on a clean Config to capture
-    // that startup baseline.
-    Config startup_baseline = defaults;
-    startup_baseline.config_path = cfg.config_path;
-    if (!parse_args(argc, argv, &startup_baseline)) return 2;
+int run_application(Config& cfg, const Config& startup_baseline) {
 
     std::unique_ptr<ISampleSource> src;
     HackRfSource* hackrf = nullptr;
@@ -980,6 +960,16 @@ int main(int argc, char** argv) {
             uint64_t last_clip_count = 0;
 
             while (g_running.load(std::memory_order_relaxed)) {
+                if (web_disp.restart_requested() || g_restart_requested.load(std::memory_order_acquire)) {
+                    std::printf("WebGUI: full application reinitialization requested\n");
+                    g_restart_requested.store(false, std::memory_order_release);
+                    g_running.store(false, std::memory_order_relaxed);
+                    web_disp.request_quit();
+                    if (dsp.joinable()) dsp.join();
+                    std::string restart_path; uint64_t restart_bytes = 0;
+                    rec.stop(&restart_path, &restart_bytes);
+                    return 75;
+                }
                 if (cfg.denoise != last_denoise ||
                     cfg.denoise_temporal != last_denoise_temporal ||
                     cfg.denoise_temporal_median != last_denoise_median ||
@@ -1139,7 +1129,7 @@ int main(int argc, char** argv) {
 
             g_running.store(false);
             web_disp.request_quit();
-            // Join is handled in WebDisplay destructor
+            if (dsp.joinable()) dsp.join();
             std::string rec_path; uint64_t rec_bytes = 0;
             if (rec.stop(&rec_path, &rec_bytes))
                 std::printf("saved %s (%.1f MB) - replay: fpvdec --input file --file %s\n", rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());
@@ -1454,4 +1444,34 @@ int main(int argc, char** argv) {
     if (rec.stop(&rec_path, &rec_bytes))
         std::printf("saved %s (%.1f MB) - replay: fpvdec --input file --file %s\n", rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());
     return rc;
+}
+
+int main(int argc, char** argv) {
+    Config defaults;
+    Config cfg = defaults;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string(argv[i]) == "--config") cfg.config_path = argv[i + 1];
+    }
+    load_config_file(cfg, cfg.config_path);
+    if (!parse_args(argc, argv, &cfg)) {
+        usage();
+        return 2;
+    }
+    save_config_file(cfg, cfg.config_path);
+
+    Config startup_baseline = defaults;
+    startup_baseline.config_path = cfg.config_path;
+    if (!parse_args(argc, argv, &startup_baseline)) return 2;
+
+    for (;;) {
+        g_running.store(true, std::memory_order_relaxed);
+        int rc = run_application(cfg, startup_baseline);
+        if (rc != 75) return rc;
+
+        // The Web UI has already persisted cfg. Reuse this live configuration
+        // and rebuild every source/DSP/display object from scratch.
+        cfg.auto_res_applied = false;
+        std::printf("Application reinitialized from persisted runtime configuration.\n");
+        std::fflush(stdout);
+    }
 }

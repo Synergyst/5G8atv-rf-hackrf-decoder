@@ -227,6 +227,7 @@ WebDisplay::~WebDisplay() {
 bool WebDisplay::init(int port, const std::string& /* title */) {
     port_ = port;
     quit_requested_.store(false);
+    restart_requested_.store(false);
     jpeg_quality_ = 75;
 
     std::printf("Web GUI starting on port %d\n", port_);
@@ -491,7 +492,8 @@ void WebDisplay::server_thread_func() {
         push_bool(CFG_CLkout, cfg_->clkout);
         push_bool(CFG_ENFORCE_CLKIN, cfg_->enforce_clkin);
         bool persisted = save_config_file(*cfg_, cfg_->config_path);
-        std::printf("WebGUI: reset to startup baseline; restart events queued (persisted=%d)\n", persisted);
+        request_restart();
+        std::printf("WebGUI: reset to startup baseline; full restart requested (persisted=%d)\n", persisted);
         std::fflush(stdout);
         res.set_content(std::string("{\"ok\":true,\"restart_queued\":true,\"persisted\":") +
                         (persisted ? "true" : "false") + "}", "application/json");

@@ -23,9 +23,11 @@ public:
 
     bool init(int port = 8080, const std::string& title = "fpvdec");
     void request_quit();
+    void request_restart() { restart_requested_.store(true); }
     void set_target_fps(int fps);
 
     bool is_running() const { return running_.load(); }
+    bool restart_requested() const { return restart_requested_.load(); }
     int port() const { return port_; }
     std::string get_url() const;
 
@@ -51,6 +53,7 @@ private:
     int port_;
     std::atomic<bool> running_{false};
     std::atomic<bool> quit_requested_{false};
+    std::atomic<bool> restart_requested_{false};
     int target_fps_ = 30;
     int jpeg_quality_ = 75;
 
