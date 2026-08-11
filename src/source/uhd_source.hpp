@@ -45,6 +45,7 @@ public:
     SampleFormat sample_format() const override { return format_; }
 
     bool set_center_freq(double center_hz) override;
+    bool restart() override;
     bool set_gains(int lna, int vga) override;
     bool set_amp(bool on) override;
 

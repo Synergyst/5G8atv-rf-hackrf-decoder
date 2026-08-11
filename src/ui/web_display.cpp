@@ -2,6 +2,7 @@
 // Serves browser UI with real-time video frames (as JPEG) and decoder stats.
 
 #include "web_display.hpp"
+#include "../config_store.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -93,6 +94,7 @@ static std::string config_to_json(const Config& cfg) {
     };
     push(json_double("video_carrier_hz", cfg.video_carrier_hz));
     push(json_double("sample_rate", cfg.sample_rate));
+    push(json_int("sample_bits", cfg.sample_bits));
     push(json_double("offset_hz", cfg.offset_hz));
     push(json_int("lna_gain", cfg.lna_gain));
     push(json_int("vga_gain", cfg.vga_gain));
@@ -440,6 +442,61 @@ void WebDisplay::server_thread_func() {
         return {false, {}};
     };
 
+    // ── /api/config/reset → restore startup baseline (including CLI overrides) ──
+    svr.Post("/api/config/reset", [this](const httplib::Request&, httplib::Response& res) {
+        if (!cfg_ || !reset_cfg_) {
+            res.set_content("{\"ok\":false,\"error\":\"no reset baseline\"}", "application/json");
+            res.status = 503;
+            return;
+        }
+        *cfg_ = *reset_cfg_;
+        auto push_bool = [&](ConfigChangeType type, bool value) {
+            if (!config_queue_) return;
+            ConfigChangeEvent event{}; event.type = type; event.val.bool_val = value; config_queue_->push(event);
+        };
+        auto push_int = [&](ConfigChangeType type, int value) {
+            if (!config_queue_) return;
+            ConfigChangeEvent event{}; event.type = type; event.val.int_val = value; config_queue_->push(event);
+        };
+        auto push_double = [&](ConfigChangeType type, double value) {
+            if (!config_queue_) return;
+            ConfigChangeEvent event{}; event.type = type; event.val.dbl_val = value; config_queue_->push(event);
+        };
+        auto push_float = [&](ConfigChangeType type, float value) {
+            if (!config_queue_) return;
+            ConfigChangeEvent event{}; event.type = type; event.val.flt_val = value; config_queue_->push(event);
+        };
+        push_double(CFG_FM_DEV, cfg_->fm_dev_hz);
+        push_bool(CFG_INVERT, cfg_->invert);
+        push_double(CFG_VIDEO_LPF, cfg_->video_lpf_hz);
+        push_bool(CFG_AFC, cfg_->afc);
+        push_float(CFG_SATURATION, cfg_->saturation);
+        push_float(CFG_HUE_DEG, cfg_->hue_deg);
+        push_float(CFG_OVERSCAN, cfg_->overscan);
+        push_float(CFG_DENOISE, cfg_->denoise);
+        push_float(CFG_DENOISE_TEMPORAL, cfg_->denoise_temporal);
+        push_int(CFG_DENOISE_MEDIAN, cfg_->denoise_temporal_median);
+        push_float(CFG_DENOINE_MEDIAN_STRENGTH, cfg_->denoise_temporal_median_strength);
+        push_double(CFG_SAMPLE_RATE, cfg_->sample_rate);
+        push_int(CFG_SAMPLE_BITS, cfg_->sample_bits);
+        push_double(CFG_VIDEO_CARRIER, cfg_->video_carrier_hz);
+        push_double(CFG_OFFSET_HZ, cfg_->offset_hz);
+        push_bool(CFG_GAIN_AUTO, cfg_->gain_auto);
+        push_int(CFG_LNA_GAIN, cfg_->lna_gain);
+        push_int(CFG_VGA_GAIN, cfg_->vga_gain);
+        push_bool(CFG_AMP, cfg_->amp);
+        push_int(CFG_FRAME_WIDTH, cfg_->frame_width);
+        push_int(CFG_FRAME_HEIGHT, cfg_->frame_height);
+        push_bool(CFG_AUTO_DETECT, cfg_->auto_detect);
+        push_bool(CFG_CLkout, cfg_->clkout);
+        push_bool(CFG_ENFORCE_CLKIN, cfg_->enforce_clkin);
+        bool persisted = save_config_file(*cfg_, cfg_->config_path);
+        std::printf("WebGUI: reset to startup baseline; restart events queued (persisted=%d)\n", persisted);
+        std::fflush(stdout);
+        res.set_content(std::string("{\"ok\":true,\"restart_queued\":true,\"persisted\":") +
+                        (persisted ? "true" : "false") + "}", "application/json");
+    });
+
     // ── /api/config/set → apply full or partial Config JSON ──
     svr.Post("/api/config/set", [this, parse_json = std::move(parse_json)](const httplib::Request& req, httplib::Response& res) {
         if (!cfg_) {
@@ -579,6 +636,15 @@ void WebDisplay::server_thread_func() {
             any_change = true; push_double(CFG_SAMPLE_RATE, cfg_->sample_rate);
             std::printf("WebGUI: sample_rate=%.1f MSPS (raw=%.0f)\n", cfg_->sample_rate / 1e6, *v);
         }
+        if (auto v = get_num_field("sample_bits")) {
+            int bits = static_cast<int>(*v);
+            if (bits == 8 || bits == 16) {
+                cfg_->sample_bits = bits;
+                any_change = true;
+                push_int(CFG_SAMPLE_BITS, cfg_->sample_bits);
+                std::printf("WebGUI: sample_bits=%d\n", cfg_->sample_bits);
+            }
+        }
         if (auto v = get_num_field("fm_dev_hz")) {
             cfg_->fm_dev_hz = std::clamp(*v, 1e6, 10e6);
             any_change = true; push_double(CFG_FM_DEV, cfg_->fm_dev_hz);
@@ -628,10 +694,14 @@ void WebDisplay::server_thread_func() {
             source_->set_amp(cfg_->amp);
         }
 
+        if (any_change) save_config_file(*cfg_, cfg_->config_path);
         std::printf("WebGUI: config set (changed=%d, body=%zu bytes)\n", any_change, body.size());
         std::fflush(stdout);
 
-        res.set_content("{\"ok\":true}", "application/json");
+        std::string response = std::string("{\"ok\":") + (any_change ? "true" : "false") +
+                               ",\"changed\":" + (any_change ? "true" : "false") +
+                               ",\"persisted\":" + (any_change ? "true" : "false") + "}";
+        res.set_content(response, "application/json");
     });
 
     // ── /api/set POST → config ──
@@ -807,6 +877,7 @@ void WebDisplay::apply_config(const std::string& key, const std::string& value) 
         return;
     }
 
+    save_config_file(*cfg_, cfg_->config_path);
     std::printf("Web config: %s = %s\n", key.c_str(), value.c_str());
     std::fflush(stdout);
 }

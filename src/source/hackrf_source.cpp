@@ -115,6 +115,11 @@ float HackRfSource::ring_fill() const {
            static_cast<float>(ring_.capacity());
 }
 
+bool HackRfSource::restart() {
+    stop();
+    return start();
+}
+
 bool HackRfSource::set_center_freq(double center_hz) {
     if (!dev_) return false;
     return hackrf_set_freq(dev_, static_cast<uint64_t>(center_hz)) ==

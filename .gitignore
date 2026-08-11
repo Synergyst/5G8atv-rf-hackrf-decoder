@@ -9,6 +9,8 @@ third_party/
 !third_party/webgui/
 
 # Generated test/artifact files
+fpvdec.json
+fpvdec.json.tmp
 *.cs8
 *.ppm
 *.bmp

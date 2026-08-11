@@ -43,6 +43,9 @@ public:
     virtual bool set_center_freq(double /* center_hz */) { return false; }
     virtual bool set_gains(int /* lna */, int /* vga */) { return false; }
     virtual bool set_amp(bool /* on */) { return false; }
+    // Reconfigure stream-level parameters after cfg has been updated. Backends
+    // may stop/recreate their hardware stream internally.
+    virtual bool restart() { return false; }
 
 private:
     std::string empty_error_;

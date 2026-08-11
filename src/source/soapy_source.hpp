@@ -44,6 +44,7 @@ public:
 
     bool set_gains(int lna, int vga) override;
     bool set_center_freq(double center_hz) override;
+    bool restart() override;
     int lna() const { return lna_; }
     int vga() const { return vga_; }
 

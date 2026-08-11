@@ -65,6 +65,10 @@ public:
     // Clear all filters.
     void clear();
 
+    // Rebuild the pipeline in place while preserving its current dimensions.
+    // Used by runtime configuration updates from the Web UI.
+    void reconfigure(int width, int height) { init(width, height); }
+
     // Access the reference frame (only valid if any filter needs it).
     const Frame* reference_frame() const { return ref_frame_.get(); }
 

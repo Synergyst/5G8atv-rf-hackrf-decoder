@@ -37,6 +37,7 @@ public:
     bool set_gains(int lna, int vga);
     bool set_center_freq(double center_hz);
     bool set_amp(bool on);
+    bool restart() override;
     // CLKIN: check if external clock is locked (0 = no, 1 = yes).
     bool check_clkin() const;
     // CLKOUT: enable or disable 10 MHz clock output.

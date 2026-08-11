@@ -35,6 +35,10 @@ NtscDecoder::NtscDecoder(const Config& cfg, TripleBuffer& out)
                       : std::vector<float>{1.0f}),
       sync_lpf_(design_lowpass(1.0e6, cfg.sample_rate, 31)),
       uv_taps_(design_lowpass(0.6e6, cfg.sample_rate, 31)) {
+    runtime_saturation_.store(cfg.saturation, std::memory_order_relaxed);
+    runtime_hue_deg_.store(cfg.hue_deg, std::memory_order_relaxed);
+    runtime_overscan_.store(cfg.overscan, std::memory_order_relaxed);
+    runtime_color_.store(cfg.mode == Config::Mode::Color, std::memory_order_relaxed);
     pll_.init(nominal_period_);
     chroma_delay_ = static_cast<int64_t>(chroma_bpf_.delay());
     sync_delay_ = static_cast<int64_t>(sync_lpf_.delay());
@@ -355,11 +359,11 @@ void NtscDecoder::decode_row(double edge) {
     const double full_start = edge + 9.4 * samples_per_us_;
     const double full_span = 52.6 * samples_per_us_;
     // TV-style overscan: display only the central part of the active line.
-    const double crop = full_span * cfg_.overscan;
+    const double crop = full_span * runtime_overscan_.load(std::memory_order_relaxed);
     const double active_start = full_start + crop;
     const double active_span = full_span - 2.0 * crop;
     const double step = active_span / f.width;
-    const bool color = cfg_.mode == Config::Mode::Color;
+    const bool color = runtime_color_.load(std::memory_order_relaxed);
 
     // Burst: ~9+ cycles starting 5.3 us after the edge; gate 3.2 us.
     BurstMeasurement burst;
@@ -375,7 +379,7 @@ void NtscDecoder::decode_row(double edge) {
         burst = measure_burst(gate.data(), gate.size(), theta0, omega_sc_,
                               kMinBurstAmp);
         stats_.burst_amp.store(burst.amplitude, std::memory_order_relaxed);
-        phi = burst.phase + cfg_.hue_deg * M_PI / 180.0;
+        phi = burst.phase + runtime_hue_deg_.load(std::memory_order_relaxed) * M_PI / 180.0;
     }
 
     // Auto-detection: track chroma frequency and active line count
@@ -480,7 +484,7 @@ void NtscDecoder::decode_row(double edge) {
             suf_[i] = au;
             svf_[i] = av;
         }
-        const float sat = cfg_.saturation;
+        const float sat = runtime_saturation_.load(std::memory_order_relaxed);
         for (int px = 0; px < f.width; ++px) {
             double p = active_start + px * step;
             float y = ire_frac(p) - chroma_frac(p);

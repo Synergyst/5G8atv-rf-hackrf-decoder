@@ -248,6 +248,12 @@ bool SoapySource::set_gains(int lna, int vga) {
     return set_gains_locked(lna, vga);
 }
 
+bool SoapySource::restart() {
+    format_ = cfg_.sample_bits == 16 ? SampleFormat::CS16 : SampleFormat::CS8;
+    stop();
+    return start();
+}
+
 bool SoapySource::set_center_freq(double center_hz) {
     std::lock_guard<std::mutex> lock(mu_);
     if (!device_) return false;

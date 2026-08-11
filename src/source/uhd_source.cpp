@@ -147,6 +147,12 @@ float UhdSource::ring_fill() const {
            static_cast<float>(ring_.capacity());
 }
 
+bool UhdSource::restart() {
+    format_ = cfg_.sample_bits == 16 ? SampleFormat::CS16 : SampleFormat::CS8;
+    stop();
+    return start();
+}
+
 bool UhdSource::set_center_freq(double center_hz) {
     std::lock_guard<std::mutex> lock(control_mutex_);
     if (!usrp_) return false;

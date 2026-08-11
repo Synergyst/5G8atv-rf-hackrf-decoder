@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "config_store.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
 #include "dsp/fm_detector.hpp"
@@ -65,6 +66,7 @@ void usage() {
         "                        8e6 keeps coarse color, <=7e6 grayscale,\n"
         "                        ~6e6 practical minimum (use whole MHz)\n"
         "  --bits 8|16           IQ sample width for UHD/SoapySDR (default 8)\n"
+        "  --config PATH         persisted configuration file (default fpvdec.json)\n"
         "  --offset HZ           tuning offset above carrier (default 0)\n"
         "  --gain auto|manual    RF gain control (default auto)\n"
         "  --lna N --vga N       gain settings (imply --gain manual)\n"
@@ -170,6 +172,7 @@ bool parse_args(int argc, char** argv, Config* cfg) {
                 return false;
             }
         } else if (a == "--file") { cfg->file_path = next("--file"); cfg->input = Config::Input::File; }
+        else if (a == "--config") cfg->config_path = next("--config");
 #ifdef HAVE_SOAPYSDR
         else if (a == "--device") cfg->soapysdr_device_args = next("--device");
 #endif
@@ -428,21 +431,22 @@ void dsp_thread(ConfigChangeQueue* events,
                 const Config& cfg, ISampleSource* src, NtscDecoder* dec,
                 Recorder* rec, std::atomic<float>* mean_raw) {
     constexpr size_t kBlockBytes = 1 << 16;
-    const size_t bytes_per_sample = src->sample_format() == SampleFormat::CS16 ? 4 : 2;
+    size_t bytes_per_sample = src->sample_format() == SampleFormat::CS16 ? 4 : 2;
+    double sample_rate = cfg.sample_rate;
     std::vector<uint8_t> raw(kBlockBytes);
     std::vector<std::complex<float>> iq(kBlockBytes / 2);
     std::vector<float> comp(kBlockBytes / 2);
 
     DcBlocker dcb;
     double offset_hz = cfg.offset_hz;
-    Nco mixer(offset_hz, cfg.sample_rate);
-    FirFilterC chan_lpf(design_lowpass(std::min(8.0e6, cfg.sample_rate * 0.49), cfg.sample_rate, 47));
+    Nco mixer(offset_hz, sample_rate);
+    FirFilterC chan_lpf(design_lowpass(std::min(8.0e6, sample_rate * 0.49), sample_rate, 47));
     double fm_dev = cfg.fm_dev_hz;
     bool invert = cfg.invert;
-    FmDetector fm_det(cfg.sample_rate, fm_dev, invert);
+    FmDetector fm_det(sample_rate, fm_dev, invert);
     double video_lpf = cfg.video_lpf_hz;
     bool use_video_lpf = video_lpf > 0.0;
-    FirFilterF video_lpf_filter(design_lowpass(use_video_lpf ? std::min(video_lpf, cfg.sample_rate * 0.45) : 1.0, cfg.sample_rate, 63));
+    FirFilterF video_lpf_filter(design_lowpass(use_video_lpf ? std::min(video_lpf, sample_rate * 0.45) : 1.0, sample_rate, 63));
 
     while (g_running.load(std::memory_order_relaxed)) {
         // Poll for config changes before each block
@@ -452,13 +456,13 @@ void dsp_thread(ConfigChangeQueue* events,
                 switch (evt.type) {
                     case CFG_FM_DEV: {
                         fm_dev = evt.val.dbl_val;
-                        fm_det = FmDetector(cfg.sample_rate, fm_dev, invert);
+                        fm_det = FmDetector(sample_rate, fm_dev, invert);
                         std::printf("DSP: fm_dev=%.1f MHz\n", fm_dev / 1e6);
                         break;
                     }
                     case CFG_INVERT: {
                         invert = evt.val.bool_val;
-                        fm_det = FmDetector(cfg.sample_rate, fm_dev, invert);
+                        fm_det = FmDetector(sample_rate, fm_dev, invert);
                         std::printf("DSP: invert=%s\n", invert ? "true" : "false");
                         break;
                     }
@@ -466,19 +470,49 @@ void dsp_thread(ConfigChangeQueue* events,
                         video_lpf = evt.val.dbl_val;
                         use_video_lpf = video_lpf > 0.0;
                         video_lpf_filter = FirFilterF(design_lowpass(
-                            use_video_lpf ? std::min(video_lpf, cfg.sample_rate * 0.45) : 1.0,
-                            cfg.sample_rate, 63));
+                            use_video_lpf ? std::min(video_lpf, sample_rate * 0.45) : 1.0,
+                            sample_rate, 63));
                         std::printf("DSP: video_lpf=%.1f MHz\n", video_lpf / 1e6);
                         break;
                     }
+                    case CFG_SAMPLE_BITS:
+                        std::printf("DSP: sample_bits=%d; restarting source\n", evt.val.int_val);
+                        if (src->restart()) {
+                            bytes_per_sample = src->sample_format() == SampleFormat::CS16 ? 4 : 2;
+                            std::printf("DSP: source restarted in %s\n", sample_format_name(src->sample_format()));
+                        } else {
+                            std::fprintf(stderr, "DSP: source restart failed: %s\n", src->error().c_str());
+                        }
+                        break;
                     case CFG_SAMPLE_RATE: {
-                        std::printf("DSP: sample_rate event received: %.1f MSPS; rebuilding DSP filters (hardware restart pending)\n", evt.val.dbl_val / 1e6);
-                        fm_det = FmDetector(evt.val.dbl_val, fm_dev, invert);
+                        sample_rate = std::clamp(evt.val.dbl_val, 6e6, 20e6);
+                        offset_hz = cfg.offset_hz;
+                        mixer.set_freq(offset_hz, sample_rate);
+                        chan_lpf = FirFilterC(design_lowpass(std::min(8.0e6, sample_rate * 0.49), sample_rate, 47));
+                        std::printf("DSP: sample_rate event received: %.1f MSPS; rebuilding DSP filters\n", sample_rate / 1e6);
+                        fm_det = FmDetector(sample_rate, fm_dev, invert);
                         video_lpf_filter = FirFilterF(design_lowpass(
-                            use_video_lpf ? std::min(video_lpf, evt.val.dbl_val * 0.45) : 1.0,
-                            evt.val.dbl_val, 63));
+                            use_video_lpf ? std::min(video_lpf, sample_rate * 0.45) : 1.0,
+                            sample_rate, 63));
+                        if (src->restart()) {
+                            bytes_per_sample = src->sample_format() == SampleFormat::CS16 ? 4 : 2;
+                            std::printf("DSP: source restarted at %.1f MSPS\n", evt.val.dbl_val / 1e6);
+                        } else {
+                            std::fprintf(stderr, "DSP: source restart failed: %s\n", src->error().c_str());
+                        }
                         break;
                     }
+                    case CFG_OFFSET_HZ:
+                        offset_hz = evt.val.dbl_val;
+                        mixer.set_freq(offset_hz, sample_rate);
+                        std::printf("DSP: offset_hz=%.0f applied\n", offset_hz);
+                        break;
+                    case CFG_GAIN_AUTO:
+                        std::printf("DSP: gain mode=%s\n", evt.val.bool_val ? "auto" : "manual");
+                        break;
+                    case CFG_VIDEO_CARRIER:
+                        std::printf("DSP: carrier target=%.3f MHz\n", evt.val.dbl_val / 1e6);
+                        break;
                     case CFG_AFC: {
                         std::printf("DSP: AFC=%s (frequency tracking %s)\n",
                                     evt.val.bool_val ? "enabled" : "disabled",
@@ -486,11 +520,21 @@ void dsp_thread(ConfigChangeQueue* events,
                         break;
                     }
                     case CFG_SATURATION:
-                    case CFG_HUE_DEG:
-                    case CFG_OVERSCAN: {
-                        std::printf("DSP: video color/crop setting event received; decoder runtime update required\n");
+                        dec->set_saturation(evt.val.flt_val);
+                        std::printf("DSP: saturation=%.2f applied\n", evt.val.flt_val);
                         break;
-                    }
+                    case CFG_HUE_DEG:
+                        dec->set_hue_deg(evt.val.flt_val);
+                        std::printf("DSP: hue_deg=%.1f applied\n", evt.val.flt_val);
+                        break;
+                    case CFG_OVERSCAN:
+                        dec->set_overscan(evt.val.flt_val);
+                        std::printf("DSP: overscan=%.3f applied\n", evt.val.flt_val);
+                        break;
+                    case CFG_FRAME_WIDTH:
+                    case CFG_FRAME_HEIGHT:
+                        std::printf("DSP: resolution change queued; coordinated restart required\n");
+                        break;
                     default: break;
                 }
             }
@@ -543,11 +587,26 @@ int run_spectrum(const Config& cfg, ISampleSource* src) {
 } // namespace
 
 int main(int argc, char** argv) {
-    Config cfg;
+    Config defaults;
+    Config cfg = defaults;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string(argv[i]) == "--config") cfg.config_path = argv[i + 1];
+    }
+    load_config_file(cfg, cfg.config_path);
     if (!parse_args(argc, argv, &cfg)) {
         usage();
         return 2;
     }
+    // CLI values are applied after persisted values and therefore act as
+    // startup overrides. Persist the resulting startup configuration so the
+    // Web UI and the next run see the effective values.
+    save_config_file(cfg, cfg.config_path);
+    // Reset means built-in defaults plus explicit CLI overrides, not persisted
+    // Web UI values. Parse the CLI a second time on a clean Config to capture
+    // that startup baseline.
+    Config startup_baseline = defaults;
+    startup_baseline.config_path = cfg.config_path;
+    if (!parse_args(argc, argv, &startup_baseline)) return 2;
 
     std::unique_ptr<ISampleSource> src;
     HackRfSource* hackrf = nullptr;
@@ -702,13 +761,17 @@ int main(int argc, char** argv) {
     cfg.auto_res_applied = true;
     
     tb.resize(cfg.frame_width, cfg.frame_height);
-    dec = new NtscDecoder(auto_cfg, tb);
+    dec = new NtscDecoder(cfg, tb);
+    dec->set_saturation(cfg.saturation);
+    dec->set_hue_deg(cfg.hue_deg);
+    dec->set_overscan(cfg.overscan);
+    dec->set_color_mode(cfg.mode == Config::Mode::Color);
     ConfigChangeQueue web_events_store;
     ConfigChangeQueue* web_events = nullptr;
 #ifdef HAVE_WEBGUI
     web_events = &web_events_store;
 #endif
-    dsp = std::thread(dsp_thread, web_events, std::cref(auto_cfg), src.get(), dec, &rec, &mean_raw);
+    dsp = std::thread(dsp_thread, web_events, std::cref(cfg), src.get(), dec, &rec, &mean_raw);
 
     int rc = 0;
 
@@ -844,7 +907,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             // Wire in config + source so /api/set can control hardware.
-            web_disp.set_source_and_config(&cfg, src.get());
+            web_disp.set_source_and_config(&cfg, src.get(), &startup_baseline);
             web_disp.set_config_queue(&web_events_store);
             web_disp.set_config_queue(&web_events_store);
 
@@ -867,6 +930,43 @@ int main(int argc, char** argv) {
                 pipeline.add(tmed);
             }
             pipeline.init(cfg.frame_width, cfg.frame_height);
+            float last_denoise = cfg.denoise;
+            float last_denoise_temporal = cfg.denoise_temporal;
+            int last_denoise_median = cfg.denoise_temporal_median;
+            float last_denoise_median_strength = cfg.denoise_temporal_median_strength;
+            int last_pipeline_width = cfg.frame_width;
+            int last_pipeline_height = cfg.frame_height;
+
+            auto rebuild_web_pipeline = [&]() {
+                pipeline.clear();
+                if (cfg.denoise > 0.0f) {
+                    auto* denoise = new Denoiser();
+                    denoise->set_strength(cfg.denoise);
+                    pipeline.add(denoise);
+                }
+                if (cfg.denoise_temporal > 0.0f) {
+                    auto* temporal = new TemporalFilter();
+                    temporal->set_alpha(cfg.denoise_temporal);
+                    pipeline.add(temporal);
+                }
+                if (cfg.denoise_temporal_median > 0) {
+                    auto* tmed = new TemporalMedian();
+                    tmed->set_frames(cfg.denoise_temporal_median);
+                    tmed->set_strength(cfg.denoise_temporal_median_strength);
+                    pipeline.add(tmed);
+                }
+                pipeline.init(cfg.frame_width, cfg.frame_height);
+                last_denoise = cfg.denoise;
+                last_denoise_temporal = cfg.denoise_temporal;
+                last_denoise_median = cfg.denoise_temporal_median;
+                last_denoise_median_strength = cfg.denoise_temporal_median_strength;
+                last_pipeline_width = cfg.frame_width;
+                last_pipeline_height = cfg.frame_height;
+                std::printf("WebGUI: filter pipeline rebuilt (denoise=%.2f temporal=%.2f median=%d strength=%.2f)\n",
+                            cfg.denoise, cfg.denoise_temporal,
+                            cfg.denoise_temporal_median,
+                            cfg.denoise_temporal_median_strength);
+            };
 
             std::string channel = fpv_nearest_channel(cfg.video_carrier_hz);
             uint64_t prev_frames = 0;
@@ -880,6 +980,12 @@ int main(int argc, char** argv) {
             uint64_t last_clip_count = 0;
 
             while (g_running.load(std::memory_order_relaxed)) {
+                if (cfg.denoise != last_denoise ||
+                    cfg.denoise_temporal != last_denoise_temporal ||
+                    cfg.denoise_temporal_median != last_denoise_median ||
+                    cfg.denoise_temporal_median_strength != last_denoise_median_strength) {
+                    rebuild_web_pipeline();
+                }
                 // Acquire frame
                 const Frame* f = tb.acquire();
                 if (f) {
@@ -957,6 +1063,12 @@ int main(int argc, char** argv) {
                     st.channel = channel;
                     st.video_latency_ms = 0;  // no reliable latency calc in Web mode
 
+                    if (cfg.frame_width != last_pipeline_width || cfg.frame_height != last_pipeline_height) {
+                        tb.resize(cfg.frame_width, cfg.frame_height);
+                        rebuild_web_pipeline();
+                        std::printf("WebGUI: resolution applied %dx%d\n", cfg.frame_width, cfg.frame_height);
+                    }
+
                     // Config state for Web GUI read-back
                     st.afc_enabled = cfg.afc;
                     st.fm_dev_hz = cfg.fm_dev_hz;
@@ -974,7 +1086,7 @@ int main(int argc, char** argv) {
                     {
                         bool locked = st.line_locked && st.vsync_locked;
                         if (locked != was_locked) { was_locked = locked; lock_changed = now; afc_meas.clear(); }
-                        if (cfg.afc && hackrf && now - last_afc >= std::chrono::milliseconds(500) &&
+                        if (cfg.afc && src && now - last_afc >= std::chrono::milliseconds(500) &&
                             now - lock_changed >= std::chrono::seconds(2)) {
                             last_afc = now;
                             afc_meas.push_back(locked ? carrier_offset_hz(*dec, cfg) :
@@ -990,7 +1102,7 @@ int main(int argc, char** argv) {
                                 if (std::abs(med) > thresh && same_sign && spread < max_spread) {
                                     double step = std::clamp(med, -clampv, clampv);
                                     cfg.video_carrier_hz += step;
-                                    hackrf->set_center_freq(cfg.center_hz());
+                                    src->set_center_freq(cfg.center_hz());
                                     dec->shift_levels(static_cast<float>((cfg.invert ? -step : step) / cfg.fm_dev_hz));
                                     channel = fpv_nearest_channel(cfg.video_carrier_hz);
                                     std::printf("AFC%s: %+0.2f MHz -> %.2f MHz\n", locked ? "" : " (coarse)", step / 1e6, cfg.video_carrier_hz / 1e6);
@@ -1128,11 +1240,13 @@ int main(int argc, char** argv) {
             if (act == KeyAction::FreqDownBig) tune = -1e6;
             if (tune != 0.0 && hackrf) {
                 mcfg.video_carrier_hz += tune;
-                hackrf->set_center_freq(mcfg.center_hz());
+                src->set_center_freq(mcfg.center_hz());
                 channel = fpv_nearest_channel(mcfg.video_carrier_hz);
             }
-            if (act == KeyAction::ToggleColor)
+            if (act == KeyAction::ToggleColor) {
                 mcfg.mode = (mcfg.mode == Config::Mode::Color) ? Config::Mode::Gray : Config::Mode::Color;
+                dec->set_color_mode(mcfg.mode == Config::Mode::Color);
+            }
 
             // Acquire the latest frame
             const Frame* f = tb.acquire();
@@ -1258,7 +1372,7 @@ int main(int argc, char** argv) {
             {
                 bool locked = st.line_locked && st.vsync_locked;
                 if (locked != was_locked) { was_locked = locked; lock_changed = now; afc_meas.clear(); }
-                if (cfg.afc && hackrf && now - last_afc >= std::chrono::milliseconds(500) && now - lock_changed >= std::chrono::seconds(2)) {
+                if (cfg.afc && src && now - last_afc >= std::chrono::milliseconds(500) && now - lock_changed >= std::chrono::seconds(2)) {
                     last_afc = now;
                     afc_meas.push_back(locked ? carrier_offset_hz(*dec, cfg) :
                         (cfg.invert ? 1.0 : -1.0) * static_cast<double>(mean_raw.load()) * cfg.fm_dev_hz);
@@ -1273,7 +1387,7 @@ int main(int argc, char** argv) {
                         if (std::abs(med) > thresh && same_sign && spread < max_spread) {
                             double step = std::clamp(med, -clampv, clampv);
                             mcfg.video_carrier_hz += step;
-                            hackrf->set_center_freq(mcfg.center_hz());
+                            src->set_center_freq(mcfg.center_hz());
                             dec->shift_levels(static_cast<float>((cfg.invert ? -step : step) / cfg.fm_dev_hz));
                             channel = fpv_nearest_channel(mcfg.video_carrier_hz);
                             std::printf("AFC%s: %+0.2f MHz -> %.2f MHz\n", locked ? "" : " (coarse)", step / 1e6, mcfg.video_carrier_hz / 1e6);

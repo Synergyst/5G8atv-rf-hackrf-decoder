@@ -66,6 +66,13 @@ public:
 
     const Stats& stats() const { return stats_; }
 
+    // Runtime video controls. These atomics let the DSP thread apply Web UI
+    // changes without racing the HTTP thread or reconstructing the decoder.
+    void set_saturation(float value) { runtime_saturation_.store(value, std::memory_order_relaxed); }
+    void set_hue_deg(float value) { runtime_hue_deg_.store(value, std::memory_order_relaxed); }
+    void set_overscan(float value) { runtime_overscan_.store(value, std::memory_order_relaxed); }
+    void set_color_mode(bool color) { runtime_color_.store(color, std::memory_order_relaxed); }
+
 private:
     enum class State { Search, Track };
 
@@ -135,6 +142,10 @@ private:
     int freerun_row_ = 0;  // "snow" rows painted while unlocked
     int search_misses_ = 0;  // consecutive lines with no sync found
     std::atomic<float> pending_shift_{0.0f};
+    std::atomic<float> runtime_saturation_{1.0f};
+    std::atomic<float> runtime_hue_deg_{0.0f};
+    std::atomic<float> runtime_overscan_{0.0f};
+    std::atomic<bool> runtime_color_{true};
 
     // Extent of the most recently found hsync pulse (slicer-asserted range).
     int64_t pulse_begin_ = 0;

@@ -11,18 +11,10 @@
 
 #include "../config.hpp"
 #include "../dsp/frame.hpp"
-#include "../source/sample_source.hpp"  // ISampleSource
-#include "sdl_display.hpp"              // OsdStats
+#include "../source/sample_source.hpp"
+#include "sdl_display.hpp"
 
 namespace famidec {
-
-
-// Web display server — headless browser-based control panel.
-// Provides an HTTP server that serves a browser UI with real-time
-// video frames and decoder stats. Uses cpp-httplib for the HTTP layer.
-//
-// Build with: cmake -DWEBGUI=ON
-// Usage: ./build/fpvdec --gui web --web-port 8080
 
 class WebDisplay {
 public:
@@ -40,25 +32,21 @@ public:
     void update_frame(const Frame* frame);
     void update_stats(const OsdStats& stats);
 
-    // Wire in a pointer to the live Config and the ISampleSource
-    // so apply_config() can write hardware state on /api/set calls.
-    void set_source_and_config(Config* cfg, ISampleSource* src) {
+    void set_source_and_config(Config* cfg, ISampleSource* src,
+                               const Config* reset_cfg = nullptr) {
         cfg_ = cfg;
         source_ = src;
+        reset_cfg_ = reset_cfg;
     }
 
-    // Wire in the ConfigChangeQueue so apply_config() can push events
-    // to the DSP thread for dynamic DSP parameter changes.
     void set_config_queue(ConfigChangeQueue* queue) {
         config_queue_ = queue;
     }
 
 private:
     void server_thread_func();
-
-    // Apply a config change from the /api/set POST endpoint.
-    // Writes directly into cfg_ and calls source_ hardware methods.
     void apply_config(const std::string& key, const std::string& value);
+    bool reset_config();
 
     int port_;
     std::atomic<bool> running_{false};
@@ -73,11 +61,9 @@ private:
 
     std::thread server_thread_;
 
-    // Wired in by set_source_and_config().
     Config* cfg_ = nullptr;
     ISampleSource* source_ = nullptr;
-
-    // Wired in by set_config_queue().
+    const Config* reset_cfg_ = nullptr;
     ConfigChangeQueue* config_queue_ = nullptr;
 };
 
