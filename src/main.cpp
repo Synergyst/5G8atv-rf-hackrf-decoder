@@ -770,6 +770,8 @@ int run_application(Config& cfg, const Config& startup_baseline) {
     // Debug mode: run DSP without GUI, print periodic stats to stdout.
     // Supports Ctrl+C (SIGINT) and --debug-duration N for finite runs.
     if (cfg.debug_mode) {
+        // A restart request is handled by the same outer lifecycle loop as
+        // WebUI; debug mode must not continue using stale DSP state.
         // SIGINT handler: set g_running false so the DSP thread exits cleanly.
         std::signal(SIGINT, [](int) { g_running.store(false, std::memory_order_relaxed); });
 
@@ -838,6 +840,14 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
 
+        if (g_lifecycle && g_lifecycle->restart_requested()) {
+            g_lifecycle->clear();
+            g_running.store(false, std::memory_order_relaxed);
+            if (dsp.joinable()) dsp.join();
+            src->stop();
+            return 75;
+        }
+
         // Final summary
         auto duration = std::chrono::steady_clock::now() - run_start;
         double total_secs = std::chrono::duration<double>(duration).count();
@@ -877,6 +887,13 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
+        }
+        if (g_lifecycle && g_lifecycle->restart_requested()) {
+            g_lifecycle->clear();
+            g_running.store(false, std::memory_order_relaxed);
+            if (dsp.joinable()) dsp.join();
+            src->stop();
+            return 75;
         }
         std::printf("wrote %d frames; decoded lines=%llu coasted=%llu frames=%llu\n",
                     written,
