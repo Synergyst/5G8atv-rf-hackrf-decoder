@@ -58,6 +58,7 @@ target_include_directories(fpv_dsp PUBLIC src)
 
 add_executable(fpvdec
     src/main.cpp
+    src/application_runner.cpp
     src/config_store.cpp
     src/runtime_coordinator.cpp
     src/runtime_modes.cpp
