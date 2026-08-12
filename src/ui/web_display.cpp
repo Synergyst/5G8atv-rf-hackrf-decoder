@@ -332,13 +332,13 @@ void WebDisplay::server_thread_func() {
 
     // ── /api/config → JSON (full Config snapshot) ──
     svr.Get("/api/config", [this](const httplib::Request&, httplib::Response& res) {
-        auto config_lock = lock_config();
         if (!cfg_) {
             res.set_content("{}", "application/json");
             res.status = 503;
             return;
         }
-        res.set_content(config_to_json(*cfg_), "application/json");
+        const Config snapshot = runtime_ ? runtime_->snapshot() : *cfg_;
+        res.set_content(config_to_json(snapshot), "application/json");
     });
 
     // ── Minimal JSON parser ────────────────────────────────────────────────
@@ -451,13 +451,13 @@ void WebDisplay::server_thread_func() {
 
     // ── /api/config/reset → restore startup baseline (including CLI overrides) ──
     svr.Post("/api/config/reset", [this](const httplib::Request&, httplib::Response& res) {
-        auto config_lock = lock_config();
         if (!cfg_ || !reset_cfg_) {
             res.set_content("{\"ok\":false,\"error\":\"no reset baseline\"}", "application/json");
             res.status = 503;
             return;
         }
-        *cfg_ = *reset_cfg_;
+        if (runtime_) runtime_->with_config([this](Config& c) { c = *reset_cfg_; });
+        else *cfg_ = *reset_cfg_;
         auto push_bool = [&](ConfigChangeType type, bool value) {
             if (!config_queue_) return;
             ConfigChangeEvent event{}; event.type = type; event.val.bool_val = value; config_queue_->push(event);
@@ -474,31 +474,31 @@ void WebDisplay::server_thread_func() {
             if (!config_queue_) return;
             ConfigChangeEvent event{}; event.type = type; event.val.flt_val = value; config_queue_->push(event);
         };
-        push_double(CFG_FM_DEV, cfg_->fm_dev_hz);
-        push_bool(CFG_INVERT, cfg_->invert);
-        push_double(CFG_VIDEO_LPF, cfg_->video_lpf_hz);
-        push_bool(CFG_AFC, cfg_->afc);
-        push_float(CFG_SATURATION, cfg_->saturation);
-        push_float(CFG_HUE_DEG, cfg_->hue_deg);
-        push_float(CFG_OVERSCAN, cfg_->overscan);
-        push_float(CFG_DENOISE, cfg_->denoise);
-        push_float(CFG_DENOISE_TEMPORAL, cfg_->denoise_temporal);
-        push_int(CFG_DENOISE_MEDIAN, cfg_->denoise_temporal_median);
-        push_float(CFG_DENOINE_MEDIAN_STRENGTH, cfg_->denoise_temporal_median_strength);
-        push_double(CFG_SAMPLE_RATE, cfg_->sample_rate);
-        push_int(CFG_SAMPLE_BITS, cfg_->sample_bits);
-        push_double(CFG_VIDEO_CARRIER, cfg_->video_carrier_hz);
-        push_double(CFG_OFFSET_HZ, cfg_->offset_hz);
-        push_bool(CFG_GAIN_AUTO, cfg_->gain_auto);
-        push_int(CFG_LNA_GAIN, cfg_->lna_gain);
-        push_int(CFG_VGA_GAIN, cfg_->vga_gain);
-        push_bool(CFG_AMP, cfg_->amp);
-        push_int(CFG_FRAME_WIDTH, cfg_->frame_width);
-        push_int(CFG_FRAME_HEIGHT, cfg_->frame_height);
-        push_bool(CFG_AUTO_DETECT, cfg_->auto_detect);
-        push_bool(CFG_CLkout, cfg_->clkout);
-        push_bool(CFG_ENFORCE_CLKIN, cfg_->enforce_clkin);
-        bool persisted = save_config_file(*cfg_, cfg_->config_path);
+        push_double(CFG_FM_DEV, reset_cfg_->fm_dev_hz);
+        push_bool(CFG_INVERT, reset_cfg_->invert);
+        push_double(CFG_VIDEO_LPF, reset_cfg_->video_lpf_hz);
+        push_bool(CFG_AFC, reset_cfg_->afc);
+        push_float(CFG_SATURATION, reset_cfg_->saturation);
+        push_float(CFG_HUE_DEG, reset_cfg_->hue_deg);
+        push_float(CFG_OVERSCAN, reset_cfg_->overscan);
+        push_float(CFG_DENOISE, reset_cfg_->denoise);
+        push_float(CFG_DENOISE_TEMPORAL, reset_cfg_->denoise_temporal);
+        push_int(CFG_DENOISE_MEDIAN, reset_cfg_->denoise_temporal_median);
+        push_float(CFG_DENOINE_MEDIAN_STRENGTH, reset_cfg_->denoise_temporal_median_strength);
+        push_double(CFG_SAMPLE_RATE, reset_cfg_->sample_rate);
+        push_int(CFG_SAMPLE_BITS, reset_cfg_->sample_bits);
+        push_double(CFG_VIDEO_CARRIER, reset_cfg_->video_carrier_hz);
+        push_double(CFG_OFFSET_HZ, reset_cfg_->offset_hz);
+        push_bool(CFG_GAIN_AUTO, reset_cfg_->gain_auto);
+        push_int(CFG_LNA_GAIN, reset_cfg_->lna_gain);
+        push_int(CFG_VGA_GAIN, reset_cfg_->vga_gain);
+        push_bool(CFG_AMP, reset_cfg_->amp);
+        push_int(CFG_FRAME_WIDTH, reset_cfg_->frame_width);
+        push_int(CFG_FRAME_HEIGHT, reset_cfg_->frame_height);
+        push_bool(CFG_AUTO_DETECT, reset_cfg_->auto_detect);
+        push_bool(CFG_CLkout, reset_cfg_->clkout);
+        push_bool(CFG_ENFORCE_CLKIN, reset_cfg_->enforce_clkin);
+        bool persisted = save_config_file(*reset_cfg_, reset_cfg_->config_path);
         request_restart();
         std::printf("WebGUI: reset to startup baseline; full restart requested (persisted=%d)\n", persisted);
         std::fflush(stdout);
@@ -508,12 +508,12 @@ void WebDisplay::server_thread_func() {
 
     // ── /api/config/set → apply full or partial Config JSON ──
     svr.Post("/api/config/set", [this, parse_json = std::move(parse_json)](const httplib::Request& req, httplib::Response& res) {
-        auto config_lock = lock_config();
         if (!cfg_) {
             res.set_content("{\"ok\":false,\"error\":\"no config\"}", "application/json");
             res.status = 503;
             return;
         }
+        Config pending = runtime_ ? runtime_->snapshot() : *cfg_;
         const std::string& body = req.body;
         if (body.empty()) {
             res.set_content("{\"ok\":false,\"error\":\"empty body\"}", "application/json");
@@ -551,166 +551,166 @@ void WebDisplay::server_thread_func() {
             ConfigChangeEvent event{};
             event.type = type;
             event.val.bool_val = value;
-            config_queue_->push(event);
+            if (runtime_) runtime_->submit(event); else config_queue_->push(event);
         };
         auto push_int = [&](ConfigChangeType type, int value) {
             if (!config_queue_) return;
             ConfigChangeEvent event{};
             event.type = type;
             event.val.int_val = value;
-            config_queue_->push(event);
+            if (runtime_) runtime_->submit(event); else config_queue_->push(event);
         };
         auto push_double = [&](ConfigChangeType type, double value) {
             if (!config_queue_) return;
             ConfigChangeEvent event{};
             event.type = type;
             event.val.dbl_val = value;
-            config_queue_->push(event);
+            if (runtime_) runtime_->submit(event); else config_queue_->push(event);
         };
         auto push_float = [&](ConfigChangeType type, float value) {
             if (!config_queue_) return;
             ConfigChangeEvent event{};
             event.type = type;
             event.val.flt_val = value;
-            config_queue_->push(event);
+            if (runtime_) runtime_->submit(event); else config_queue_->push(event);
         };
 
         bool any_change = false;
 
         if (auto v = get_bool_field("afc")) {
-            cfg_->afc = *v; any_change = true; push_bool(CFG_AFC, cfg_->afc);
+            pending.afc = *v; any_change = true; push_bool(CFG_AFC, pending.afc);
             std::printf("WebGUI: afc=%s\n", *v ? "true" : "false");
         }
         if (auto v = get_bool_field("invert")) {
-            cfg_->invert = *v; any_change = true; push_bool(CFG_INVERT, cfg_->invert);
+            pending.invert = *v; any_change = true; push_bool(CFG_INVERT, pending.invert);
             std::printf("WebGUI: invert=%s\n", *v ? "true" : "false");
         }
         if (auto v = get_bool_field("gain_auto")) {
-            cfg_->gain_auto = *v; any_change = true; push_bool(CFG_GAIN_AUTO, cfg_->gain_auto);
+            pending.gain_auto = *v; any_change = true; push_bool(CFG_GAIN_AUTO, pending.gain_auto);
             std::printf("WebGUI: gain_auto=%s\n", *v ? "true" : "false");
         }
         if (auto v = get_bool_field("amp")) {
-            cfg_->amp = *v; any_change = true; push_bool(CFG_AMP, cfg_->amp);
+            pending.amp = *v; any_change = true; push_bool(CFG_AMP, pending.amp);
             std::printf("WebGUI: amp=%s\n", *v ? "true" : "false");
         }
         if (auto v = get_bool_field("auto_detect")) {
-            cfg_->auto_detect = *v; any_change = true; push_bool(CFG_AUTO_DETECT, cfg_->auto_detect);
+            pending.auto_detect = *v; any_change = true; push_bool(CFG_AUTO_DETECT, pending.auto_detect);
             std::printf("WebGUI: auto_detect=%s\n", *v ? "true" : "false");
         }
         if (auto v = get_bool_field("clkout")) {
-            cfg_->clkout = *v; any_change = true; push_bool(CFG_CLkout, cfg_->clkout);
+            pending.clkout = *v; any_change = true; push_bool(CFG_CLkout, pending.clkout);
             std::printf("WebGUI: clkout=%s\n", *v ? "true" : "false");
         }
         if (auto v = get_bool_field("enforce_clkin")) {
-            cfg_->enforce_clkin = *v; any_change = true; push_bool(CFG_ENFORCE_CLKIN, cfg_->enforce_clkin);
+            pending.enforce_clkin = *v; any_change = true; push_bool(CFG_ENFORCE_CLKIN, pending.enforce_clkin);
             std::printf("WebGUI: enforce_clkin=%s\n", *v ? "true" : "false");
         }
 
         if (auto v = get_num_field("lna_gain")) {
-            cfg_->lna_gain = std::clamp((static_cast<int>(*v) / 8) * 8, 0, 40);
-            any_change = true; push_int(CFG_LNA_GAIN, cfg_->lna_gain);
-            std::printf("WebGUI: lna_gain=%d (raw=%.0f)\n", cfg_->lna_gain, *v);
+            pending.lna_gain = std::clamp((static_cast<int>(*v) / 8) * 8, 0, 40);
+            any_change = true; push_int(CFG_LNA_GAIN, pending.lna_gain);
+            std::printf("WebGUI: lna_gain=%d (raw=%.0f)\n", pending.lna_gain, *v);
         }
         if (auto v = get_num_field("vga_gain")) {
-            cfg_->vga_gain = std::clamp((static_cast<int>(*v) / 2) * 2, 0, 62);
-            any_change = true; push_int(CFG_VGA_GAIN, cfg_->vga_gain);
-            std::printf("WebGUI: vga_gain=%d (raw=%.0f)\n", cfg_->vga_gain, *v);
+            pending.vga_gain = std::clamp((static_cast<int>(*v) / 2) * 2, 0, 62);
+            any_change = true; push_int(CFG_VGA_GAIN, pending.vga_gain);
+            std::printf("WebGUI: vga_gain=%d (raw=%.0f)\n", pending.vga_gain, *v);
         }
         if (auto v = get_num_field("denoise_temporal_median")) {
             int n = static_cast<int>(*v);
             if (n <= 0) n = 0;
             else { if (n % 2 == 0) ++n; n = std::clamp(n, 3, 9); }
-            cfg_->denoise_temporal_median = n;
+            pending.denoise_temporal_median = n;
             any_change = true; push_int(CFG_DENOISE_MEDIAN, n);
             std::printf("WebGUI: denoise_temporal_median=%d (raw=%.0f)\n", n, *v);
         }
         if (auto v = get_num_field("frame_width")) {
-            cfg_->frame_width = std::clamp(static_cast<int>(*v), 320, 1920);
-            any_change = true; push_int(CFG_FRAME_WIDTH, cfg_->frame_width);
-            std::printf("WebGUI: frame_width=%d (raw=%.0f)\n", cfg_->frame_width, *v);
+            pending.frame_width = std::clamp(static_cast<int>(*v), 320, 1920);
+            any_change = true; push_int(CFG_FRAME_WIDTH, pending.frame_width);
+            std::printf("WebGUI: frame_width=%d (raw=%.0f)\n", pending.frame_width, *v);
         }
         if (auto v = get_num_field("frame_height")) {
-            cfg_->frame_height = std::clamp(static_cast<int>(*v), 240, 1080);
-            any_change = true; push_int(CFG_FRAME_HEIGHT, cfg_->frame_height);
-            std::printf("WebGUI: frame_height=%d (raw=%.0f)\n", cfg_->frame_height, *v);
+            pending.frame_height = std::clamp(static_cast<int>(*v), 240, 1080);
+            any_change = true; push_int(CFG_FRAME_HEIGHT, pending.frame_height);
+            std::printf("WebGUI: frame_height=%d (raw=%.0f)\n", pending.frame_height, *v);
         }
 
         if (auto v = get_num_field("video_carrier_hz")) {
-            cfg_->video_carrier_hz = std::clamp(*v, 5.6e9, 6.0e9);
-            any_change = true; push_double(CFG_VIDEO_CARRIER, cfg_->video_carrier_hz);
-            std::printf("WebGUI: video_carrier_hz=%.3f MHz (raw=%.0f)\n", cfg_->video_carrier_hz / 1e6, *v);
+            pending.video_carrier_hz = std::clamp(*v, 5.6e9, 6.0e9);
+            any_change = true; push_double(CFG_VIDEO_CARRIER, pending.video_carrier_hz);
+            std::printf("WebGUI: video_carrier_hz=%.3f MHz (raw=%.0f)\n", pending.video_carrier_hz / 1e6, *v);
         }
         if (auto v = get_num_field("offset_hz")) {
-            cfg_->offset_hz = std::clamp(*v, -2e6, 2e6);
-            any_change = true; push_double(CFG_OFFSET_HZ, cfg_->offset_hz);
-            std::printf("WebGUI: offset_hz=%.0f Hz (raw=%.0f)\n", cfg_->offset_hz, *v);
+            pending.offset_hz = std::clamp(*v, -2e6, 2e6);
+            any_change = true; push_double(CFG_OFFSET_HZ, pending.offset_hz);
+            std::printf("WebGUI: offset_hz=%.0f Hz (raw=%.0f)\n", pending.offset_hz, *v);
         }
         if (auto v = get_num_field("sample_rate")) {
-            cfg_->sample_rate = std::clamp(*v, 6e6, 20e6);
-            any_change = true; push_double(CFG_SAMPLE_RATE, cfg_->sample_rate);
-            std::printf("WebGUI: sample_rate=%.1f MSPS (raw=%.0f)\n", cfg_->sample_rate / 1e6, *v);
+            pending.sample_rate = std::clamp(*v, 6e6, 20e6);
+            any_change = true; push_double(CFG_SAMPLE_RATE, pending.sample_rate);
+            std::printf("WebGUI: sample_rate=%.1f MSPS (raw=%.0f)\n", pending.sample_rate / 1e6, *v);
         }
         if (auto v = get_num_field("sample_bits")) {
             int bits = static_cast<int>(*v);
             if (bits == 8 || bits == 16) {
-                cfg_->sample_bits = bits;
+                pending.sample_bits = bits;
                 any_change = true;
-                push_int(CFG_SAMPLE_BITS, cfg_->sample_bits);
-                std::printf("WebGUI: sample_bits=%d\n", cfg_->sample_bits);
+                push_int(CFG_SAMPLE_BITS, pending.sample_bits);
+                std::printf("WebGUI: sample_bits=%d\n", pending.sample_bits);
             }
         }
         if (auto v = get_num_field("fm_dev_hz")) {
-            cfg_->fm_dev_hz = std::clamp(*v, 1e6, 10e6);
-            any_change = true; push_double(CFG_FM_DEV, cfg_->fm_dev_hz);
-            std::printf("WebGUI: fm_dev_hz=%.1f MHz (raw=%.0f)\n", cfg_->fm_dev_hz / 1e6, *v);
+            pending.fm_dev_hz = std::clamp(*v, 1e6, 10e6);
+            any_change = true; push_double(CFG_FM_DEV, pending.fm_dev_hz);
+            std::printf("WebGUI: fm_dev_hz=%.1f MHz (raw=%.0f)\n", pending.fm_dev_hz / 1e6, *v);
         }
         if (auto v = get_num_field("video_lpf_hz")) {
-            cfg_->video_lpf_hz = std::clamp(*v, 0.0, 6e6);
-            any_change = true; push_double(CFG_VIDEO_LPF, cfg_->video_lpf_hz);
-            std::printf("WebGUI: video_lpf_hz=%.1f MHz (raw=%.0f)\n", cfg_->video_lpf_hz / 1e6, *v);
+            pending.video_lpf_hz = std::clamp(*v, 0.0, 6e6);
+            any_change = true; push_double(CFG_VIDEO_LPF, pending.video_lpf_hz);
+            std::printf("WebGUI: video_lpf_hz=%.1f MHz (raw=%.0f)\n", pending.video_lpf_hz / 1e6, *v);
         }
 
         if (auto v = get_num_field("saturation")) {
-            cfg_->saturation = std::clamp(static_cast<float>(*v), 0.0f, 2.0f);
-            any_change = true; push_float(CFG_SATURATION, cfg_->saturation);
-            std::printf("WebGUI: saturation=%.2f (raw=%.4g)\n", cfg_->saturation, *v);
+            pending.saturation = std::clamp(static_cast<float>(*v), 0.0f, 2.0f);
+            any_change = true; push_float(CFG_SATURATION, pending.saturation);
+            std::printf("WebGUI: saturation=%.2f (raw=%.4g)\n", pending.saturation, *v);
         }
         if (auto v = get_num_field("hue_deg")) {
-            cfg_->hue_deg = std::clamp(static_cast<float>(*v), -180.0f, 180.0f);
-            any_change = true; push_float(CFG_HUE_DEG, cfg_->hue_deg);
-            std::printf("WebGUI: hue_deg=%.1f (raw=%.4g)\n", cfg_->hue_deg, *v);
+            pending.hue_deg = std::clamp(static_cast<float>(*v), -180.0f, 180.0f);
+            any_change = true; push_float(CFG_HUE_DEG, pending.hue_deg);
+            std::printf("WebGUI: hue_deg=%.1f (raw=%.4g)\n", pending.hue_deg, *v);
         }
         if (auto v = get_num_field("denoise")) {
-            cfg_->denoise = std::clamp(static_cast<float>(*v), 0.0f, 1.0f);
-            any_change = true; push_float(CFG_DENOISE, cfg_->denoise);
-            std::printf("WebGUI: denoise=%.2f (raw=%.4g)\n", cfg_->denoise, *v);
+            pending.denoise = std::clamp(static_cast<float>(*v), 0.0f, 1.0f);
+            any_change = true; push_float(CFG_DENOISE, pending.denoise);
+            std::printf("WebGUI: denoise=%.2f (raw=%.4g)\n", pending.denoise, *v);
         }
         if (auto v = get_num_field("denoise_temporal")) {
-            cfg_->denoise_temporal = std::clamp(static_cast<float>(*v), 0.0f, 1.0f);
-            any_change = true; push_float(CFG_DENOISE_TEMPORAL, cfg_->denoise_temporal);
-            std::printf("WebGUI: denoise_temporal=%.2f (raw=%.4g)\n", cfg_->denoise_temporal, *v);
+            pending.denoise_temporal = std::clamp(static_cast<float>(*v), 0.0f, 1.0f);
+            any_change = true; push_float(CFG_DENOISE_TEMPORAL, pending.denoise_temporal);
+            std::printf("WebGUI: denoise_temporal=%.2f (raw=%.4g)\n", pending.denoise_temporal, *v);
         }
         if (auto v = get_num_field("denoise_temporal_median_strength")) {
-            cfg_->denoise_temporal_median_strength = std::clamp(static_cast<float>(*v), 0.0f, 1.0f);
-            any_change = true; push_float(CFG_DENOINE_MEDIAN_STRENGTH, cfg_->denoise_temporal_median_strength);
-            std::printf("WebGUI: denoise_temporal_median_strength=%.2f (raw=%.4g)\n", cfg_->denoise_temporal_median_strength, *v);
+            pending.denoise_temporal_median_strength = std::clamp(static_cast<float>(*v), 0.0f, 1.0f);
+            any_change = true; push_float(CFG_DENOINE_MEDIAN_STRENGTH, pending.denoise_temporal_median_strength);
+            std::printf("WebGUI: denoise_temporal_median_strength=%.2f (raw=%.4g)\n", pending.denoise_temporal_median_strength, *v);
         }
         if (auto v = get_num_field("overscan")) {
-            cfg_->overscan = std::clamp(static_cast<float>(*v), 0.0f, 0.15f);
-            any_change = true; push_float(CFG_OVERSCAN, cfg_->overscan);
-            std::printf("WebGUI: overscan=%.2f (raw=%.4g)\n", cfg_->overscan, *v);
+            pending.overscan = std::clamp(static_cast<float>(*v), 0.0f, 0.15f);
+            any_change = true; push_float(CFG_OVERSCAN, pending.overscan);
+            std::printf("WebGUI: overscan=%.2f (raw=%.4g)\n", pending.overscan, *v);
         }
 
         // Apply hardware changes
         if (any_change && source_) {
-            source_->set_center_freq(cfg_->center_hz());
-            source_->set_gains(cfg_->lna_gain, cfg_->vga_gain);
-            source_->set_amp(cfg_->amp);
+            source_->set_center_freq(pending.center_hz());
+            source_->set_gains(pending.lna_gain, pending.vga_gain);
+            source_->set_amp(pending.amp);
         }
 
         if (any_change) request_restart();
 
-        bool persisted = !any_change || save_config_file(*cfg_, cfg_->config_path);
+        bool persisted = !any_change || save_config_file(pending, pending.config_path);
         std::printf("WebGUI: config set (changed=%d, persisted=%d, body=%zu bytes)\n", any_change, persisted, body.size());
         std::fflush(stdout);
 
@@ -809,11 +809,11 @@ void WebDisplay::update_stats(const OsdStats& stats) {
 }
 
 void WebDisplay::apply_config(const std::string& key, const std::string& value) {
-    auto config_lock = lock_config();
     if (!cfg_) {
         std::fprintf(stderr, "WebGUI: no config wired in\n");
         return;
     }
+    Config pending = runtime_ ? runtime_->snapshot() : *cfg_;
 
     auto push_bool = [&](ConfigChangeType type, bool v) {
         if (!config_queue_) return;
@@ -845,58 +845,58 @@ void WebDisplay::apply_config(const std::string& key, const std::string& value) 
     };
 
     if (key == "saturation") {
-        cfg_->saturation = std::clamp(static_cast<float>(std::atof(value.c_str())), 0.0f, 2.0f);
-        push_float(CFG_SATURATION, cfg_->saturation);
+        pending.saturation = std::clamp(static_cast<float>(std::atof(value.c_str())), 0.0f, 2.0f);
+        push_float(CFG_SATURATION, pending.saturation);
     } else if (key == "hue_deg") {
-        cfg_->hue_deg = std::clamp(static_cast<float>(std::atof(value.c_str())), -180.0f, 180.0f);
-        push_float(CFG_HUE_DEG, cfg_->hue_deg);
+        pending.hue_deg = std::clamp(static_cast<float>(std::atof(value.c_str())), -180.0f, 180.0f);
+        push_float(CFG_HUE_DEG, pending.hue_deg);
     } else if (key == "denoise") {
-        cfg_->denoise = std::clamp(static_cast<float>(std::atof(value.c_str())), 0.0f, 1.0f);
-        push_float(CFG_DENOISE, cfg_->denoise);
+        pending.denoise = std::clamp(static_cast<float>(std::atof(value.c_str())), 0.0f, 1.0f);
+        push_float(CFG_DENOISE, pending.denoise);
     } else if (key == "denoise_temporal") {
-        cfg_->denoise_temporal = std::clamp(static_cast<float>(std::atof(value.c_str())), 0.0f, 1.0f);
-        push_float(CFG_DENOISE_TEMPORAL, cfg_->denoise_temporal);
+        pending.denoise_temporal = std::clamp(static_cast<float>(std::atof(value.c_str())), 0.0f, 1.0f);
+        push_float(CFG_DENOISE_TEMPORAL, pending.denoise_temporal);
     } else if (key == "denoise_temporal_median") {
         int n = std::atoi(value.c_str());
         if (n <= 0) n = 0;
         else { if (n % 2 == 0) ++n; n = std::clamp(n, 3, 9); }
-        cfg_->denoise_temporal_median = n;
+        pending.denoise_temporal_median = n;
         push_int(CFG_DENOISE_MEDIAN, n);
     } else if (key == "channel") {
         double hz = 0.0;
         if (fpv_channel_freq(value, &hz)) {
-            cfg_->video_carrier_hz = hz;
-            if (source_) source_->set_center_freq(cfg_->center_hz());
-            push_double(CFG_VIDEO_CARRIER, cfg_->video_carrier_hz);
+            pending.video_carrier_hz = hz;
+            if (source_) source_->set_center_freq(pending.center_hz());
+            push_double(CFG_VIDEO_CARRIER, pending.video_carrier_hz);
         }
     } else if (key == "offset") {
-        cfg_->offset_hz += std::atof(value.c_str());
-        if (source_) source_->set_center_freq(cfg_->center_hz());
-        push_double(CFG_OFFSET_HZ, cfg_->offset_hz);
+        pending.offset_hz += std::atof(value.c_str());
+        if (source_) source_->set_center_freq(pending.center_hz());
+        push_double(CFG_OFFSET_HZ, pending.offset_hz);
     } else if (key == "gain") {
-        if (value == "auto") cfg_->gain_auto = true;
-        else if (value == "manual") cfg_->gain_auto = false;
+        if (value == "auto") pending.gain_auto = true;
+        else if (value == "manual") pending.gain_auto = false;
         else return;
-        push_bool(CFG_GAIN_AUTO, cfg_->gain_auto);
-        if (source_ && cfg_->gain_auto) source_->set_gains(cfg_->lna_gain, cfg_->vga_gain);
+        push_bool(CFG_GAIN_AUTO, pending.gain_auto);
+        if (source_ && pending.gain_auto) source_->set_gains(pending.lna_gain, pending.vga_gain);
     } else if (key == "lna") {
-        cfg_->lna_gain = std::clamp((std::atoi(value.c_str()) / 8) * 8, 0, 40);
-        if (source_) source_->set_gains(cfg_->lna_gain, cfg_->vga_gain);
-        push_int(CFG_LNA_GAIN, cfg_->lna_gain);
+        pending.lna_gain = std::clamp((std::atoi(value.c_str()) / 8) * 8, 0, 40);
+        if (source_) source_->set_gains(pending.lna_gain, pending.vga_gain);
+        push_int(CFG_LNA_GAIN, pending.lna_gain);
     } else if (key == "vga") {
-        cfg_->vga_gain = std::clamp((std::atoi(value.c_str()) / 2) * 2, 0, 62);
-        if (source_) source_->set_gains(cfg_->lna_gain, cfg_->vga_gain);
-        push_int(CFG_VGA_GAIN, cfg_->vga_gain);
+        pending.vga_gain = std::clamp((std::atoi(value.c_str()) / 2) * 2, 0, 62);
+        if (source_) source_->set_gains(pending.lna_gain, pending.vga_gain);
+        push_int(CFG_VGA_GAIN, pending.vga_gain);
     } else if (key == "amp") {
-        cfg_->amp = value == "on" || value == "true" || value == "1";
-        if (source_) source_->set_amp(cfg_->amp);
-        push_bool(CFG_AMP, cfg_->amp);
+        pending.amp = value == "on" || value == "true" || value == "1";
+        if (source_) source_->set_amp(pending.amp);
+        push_bool(CFG_AMP, pending.amp);
     } else {
         std::fprintf(stderr, "WebGUI: unknown key '%s' ignored\n", key.c_str());
         return;
     }
 
-    save_config_file(*cfg_, cfg_->config_path);
+    save_config_file(pending, pending.config_path);
     request_restart();
     std::printf("Web config: %s = %s\n", key.c_str(), value.c_str());
     std::fflush(stdout);

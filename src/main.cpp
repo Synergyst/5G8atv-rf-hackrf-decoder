@@ -762,6 +762,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
 #ifdef HAVE_WEBGUI
     web_events = &web_events_store;
 #endif
+    runtime.set_event_queue(web_events);
     dsp = std::thread(dsp_thread, web_events, std::cref(cfg), src.get(), dec, &rec, &mean_raw);
 
     int rc = 0;
