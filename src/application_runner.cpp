@@ -20,6 +20,7 @@
 #include "runtime_session.hpp"
 #include "runtime_coordinator.hpp"
 #include "runtime_modes.hpp"
+#include "runtime_auto_resolution.hpp"
 #include "runtime_recording.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
@@ -204,25 +205,9 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         bool is_pal = (chroma_hz > 4.0e6);
         if (active_lines <= 0) active_lines = is_pal ? 288 : 240;
         
-        int target_width = cfg.frame_width;
-        int target_height = cfg.frame_height;
-        if (auto_cfg.aspect_ratio == Config::AspectRatio::R16_9) {
-            target_width = static_cast<int>(target_height * 16.0 / 9.0 + 0.5);
-        } else if (auto_cfg.aspect_ratio == Config::AspectRatio::R16_10) {
-            target_width = static_cast<int>(target_height * 16.0 / 10.0 + 0.5);
-        } else if (auto_cfg.aspect_ratio == Config::AspectRatio::R5_4) {
-            target_width = static_cast<int>(target_height * 5.0 / 4.0 + 0.5);
-        } else if (auto_cfg.aspect_ratio == Config::AspectRatio::R4_3) {
-            target_width = static_cast<int>(target_height * 4.0 / 3.0 + 0.5);
-        }
-        if (auto_cfg.aspect_ratio == Config::AspectRatio::Custom) {
-            target_width = cfg.frame_width;
-            target_height = cfg.frame_height;
-        }
-        
-        auto_cfg.frame_width = target_width;
-        auto_cfg.frame_height = target_height;
-        auto_cfg.auto_res_applied = true;
+        AutoResolution::apply_aspect(auto_cfg, tmp_dec);
+        const int target_width = auto_cfg.frame_width;
+        const int target_height = auto_cfg.frame_height;
         
         std::printf("AUTO-RES: detected %s (chroma=%.2f MHz, %d active lines, "
                    "horiz_detail=%d, line_rate=%.3f kHz)\n",
@@ -478,18 +463,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                         int line_rate_mhz = dec->stats().detected_line_rate.load(std::memory_order_acquire);
                         bool is_pal = (chroma_hz > 4.0e6);
                         if (active_lines <= 0) active_lines = is_pal ? 288 : 240;
-                        int target_width = cfg.frame_width;
-                        int target_height = cfg.frame_height;
-                        if (cfg.aspect_ratio == Config::AspectRatio::R16_9)
-                            target_width = static_cast<int>(target_height * 16.0 / 9.0 + 0.5);
-                        else if (cfg.aspect_ratio == Config::AspectRatio::R16_10)
-                            target_width = static_cast<int>(target_height * 16.0 / 10.0 + 0.5);
-                        else if (cfg.aspect_ratio == Config::AspectRatio::R5_4)
-                            target_width = static_cast<int>(target_height * 5.0 / 4.0 + 0.5);
-                        else if (cfg.aspect_ratio == Config::AspectRatio::R4_3)
-                            target_width = static_cast<int>(target_height * 4.0 / 3.0 + 0.5);
-                        cfg.frame_width = target_width;
-                        cfg.frame_height = target_height;
+                        AutoResolution::apply_aspect(cfg, *dec);
                         cfg.auto_res_applied = true;
                         // Resolution changes are structural. Let the common
                         // restart path rebuild buffers and filters after all
@@ -755,40 +729,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                     active_lines = is_pal ? 288 : 240;  // PAL vs NTSC standard
                 }
                 
-                // Apply aspect ratio preset to calculate target dimensions
-                int target_width = mcfg.frame_width;
-                int target_height = mcfg.frame_height;
-                
-                if (mcfg.aspect_ratio != Config::AspectRatio::Custom && 
-                    mcfg.aspect_ratio != Config::AspectRatio::R4_3 &&
-                    mcfg.aspect_ratio != Config::AspectRatio::R16_9 &&
-                    mcfg.aspect_ratio != Config::AspectRatio::R16_10 &&
-                    mcfg.aspect_ratio != Config::AspectRatio::R5_4) {
-                    // Custom resolution — use user-specified
-                } else if (mcfg.aspect_ratio == Config::AspectRatio::R16_9) {
-                    // 16:9 widescreen
-                    target_width = static_cast<int>(target_height * 16.0 / 9.0 + 0.5);
-                } else if (mcfg.aspect_ratio == Config::AspectRatio::R16_10) {
-                    // 16:10
-                    target_width = static_cast<int>(target_height * 16.0 / 10.0 + 0.5);
-                } else if (mcfg.aspect_ratio == Config::AspectRatio::R5_4) {
-                    // 5:4
-                    target_width = static_cast<int>(target_height * 5.0 / 4.0 + 0.5);
-                } else if (mcfg.aspect_ratio == Config::AspectRatio::R4_3) {
-                    // 4:3 standard
-                    target_width = static_cast<int>(target_height * 4.0 / 3.0 + 0.5);
-                }
-                
-                // If user specified --resolution, respect it
-                if (mcfg.aspect_ratio == Config::AspectRatio::Custom) {
-                    target_width = mcfg.frame_width;
-                    target_height = mcfg.frame_height;
-                }
-                
-                // Apply the new resolution
-                mcfg.frame_width = target_width;
-                mcfg.frame_height = target_height;
-                mcfg.auto_res_applied = true;
+                AutoResolution::apply_aspect(mcfg, *dec);
                 // Resolution changes are structural. Stop the current run and
                 // let the outer restart path rebuild all frame/display state.
                 lifecycle.request_restart();

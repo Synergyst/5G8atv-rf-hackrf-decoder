@@ -61,6 +61,7 @@ add_executable(fpvdec
     src/application_runner.cpp
     src/config_store.cpp
     src/runtime_coordinator.cpp
+    src/runtime_auto_resolution.cpp
     src/runtime_modes.cpp
     src/source/hackrf_source.cpp
     src/ui/sdl_display.cpp
