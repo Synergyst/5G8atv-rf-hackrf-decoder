@@ -22,7 +22,7 @@
 namespace famidec {
 
 namespace {
-void dsp_loop(ConfigChangeQueue* events, const Config& cfg, ISampleSource* src,
+void dsp_loop(ConfigChangeQueue* events, Config cfg, ISampleSource* src,
               NtscDecoder* dec, IRawRecorder* recorder,
               std::atomic<float>* mean_raw, std::atomic<bool>& running,
               RuntimeLifecycle& lifecycle) {
@@ -143,7 +143,7 @@ bool RuntimeCoordinator::start_dsp(NtscDecoder* decoder, IRawRecorder* recorder,
                                    ConfigChangeQueue* events) {
     if (!source_ || !decoder || !mean_raw || dsp_.joinable()) return false;
     const Config cfg = control_.snapshot();
-    dsp_ = std::thread(dsp_loop, events, std::cref(cfg), source_.get(), decoder,
+    dsp_ = std::thread(dsp_loop, events, cfg, source_.get(), decoder,
                        recorder, mean_raw, std::ref(running_), std::ref(lifecycle_));
     return true;
 }
