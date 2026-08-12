@@ -23,6 +23,8 @@ native UHD and SoapySDR backends are also available:
 
 ![Setup: HackRF One + whoop + fpvdec live decode](docs/IMG_9715.jpeg)
 
+![Example: LibreSDR B220mini + XScreenSaver + fpvdec live decode](docs/webUI_UHD_Screenshot_20260811_195504_Chrome.jpg)
+
 ## Noise Reduction Filters
 
 fpvdec includes a modular post-frame denoise pipeline that removes RF noise
