@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd /home/dragonos/Sources/5G8atv-rf-hackrf-decoder
+cd "$(dirname "$(readlink -f "$0")")"
 
 ./build-only.sh all
 
@@ -14,4 +14,4 @@ cd /home/dragonos/Sources/5G8atv-rf-hackrf-decoder
 #./build/fpvdec --no-amp --vga 36 --rate 9e6 --gain manual --freq 5865000000 --channel A1 --enforce-clkin --overlay-font 18 --overlay-color 192,192,0 --no-stats --no-clkin --no-agc --no-signal --resolution 640x480 --source hackrf --gui imgui --lpf 2e6 --dev 1e6 --no-afc --mode gray --denoise-temporal 0.1 --denoise-temporal-median 7 --denoise-temporal-median-strength 0.5
 
 #./build/fpvdec --no-amp --lna 40 --vga 32 --rate 12e6 --gain auto --channel A1 --enforce-clkin --resolution 640x480 --source hackrf --web-port 9090 --gui imgui --lpf 4.2e6 --dev 5e6 --bits 8
-./build/fpvdec --uhd-gain 50 --rate 10e6 --gain manual --channel A1 --enforce-clkin --resolution 640x480 --source uhd --web-port 9090 --gui imgui --lpf 4.2e6 --dev 5e6 --bits 16
+./build/fpvdec --uhd-gain 50 --rate 10e6 --gain manual --channel A1 --enforce-clkin --resolution 640x480 --source uhd --web-port 9090 --gui web --lpf 4.2e6 --dev 5e6 --bits 16

@@ -41,8 +41,8 @@ public:
         std::atomic<uint64_t> samples_in{0};
 
         // Auto-detection results (populated after lock is acquired).
-        std::atomic<double> detected_chroma_hz{0.0};  // measured burst subcarrier
-        std::atomic<int> detected_active_lines{0};    // lines between vsync
+        std::atomic<double> detected_chroma_hz{0.0};  // configured/validated NTSC burst frequency
+        std::atomic<int> detected_active_lines{0};    // active lines in the current field
         std::atomic<int> detected_line_rate{0};       // hsync frequency in mHz
         std::atomic<double> detected_active_us{0.0};  // active line duration in microseconds
         std::atomic<int> detected_horiz_detail{0};    // max horizontal detail pixels

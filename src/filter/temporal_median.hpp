@@ -39,8 +39,11 @@ public:
         // Layout: [frame0, frame1, ..., frameN-1] for pixel 0,
         //         then [frame0, frame1, ..., frameN-1] for pixel 1, etc.
         // Total size: num_pixels * depth
-        ring_.resize(num_pixels * N, 128);  // initialize to mid-gray
+        ring_.assign(num_pixels * N, 128);  // initialize to mid-gray
+        y_current_.resize(num_pixels);
+        scratch_.resize(N);
         head_ = 0;  // next write position in circular buffer
+        valid_frames_ = 0;
     }
 
     void process(Frame& frame) override {
@@ -51,52 +54,43 @@ public:
         const size_t N = static_cast<size_t>(depth_);
         const size_t num_pixels = W * H;
         const uint32_t* px = frame.rgba.data();
-        uint32_t* dst = const_cast<uint32_t*>(px);
+        uint32_t* dst = frame.rgba.data();
 
-        // Compute current Y for each pixel
-        std::vector<uint16_t> y_cur(num_pixels);
+        // Compute current Y for each pixel before writing any filtered pixels
+        // back. The history must contain the unmodified input frame.
         for (size_t i = 0; i < num_pixels; ++i) {
             uint32_t p = px[i];
             int r = static_cast<int>(p) & 0xff;
             int g = static_cast<int>((p >> 8)) & 0xff;
             int b = static_cast<int>((p >> 16)) & 0xff;
             int y16 = (r * 77 + g * 150 + b * 29 + 128) >> 8;
-            y_cur[i] = static_cast<uint16_t>(std::clamp(y16, 0, 255));
+            y_current_[i] = static_cast<uint16_t>(std::clamp(y16, 0, 255));
         }
 
-        // For each pixel:
-        // 1. Compute the running median from the ring buffer (excluding current)
-        // 2. If |Y_cur - median| > threshold, replace with median
-        // 3. Write Y_cur into the ring buffer (advance head)
-        // 4. Write back Y (possibly replaced) to the frame
-
-        // Scratch buffer for sorting N values
-        std::vector<uint16_t> scratch(N);
-
+        // Compute the median from the previous history, then write the whole
+        // input frame to one ring slot. Advance head exactly once per frame,
+        // not once per pixel.
         for (size_t i = 0; i < num_pixels; ++i) {
-            // Read N values from ring buffer into scratch
+            // Read N values from ring buffer into the reusable scratch buffer.
             for (size_t j = 0; j < N; ++j) {
-                scratch[j] = ring_[i * N + j];
+                scratch_[j] = ring_[i * N + j];
             }
 
-            // Find median by sorting (N is small: 3, 5, or 7)
-            // Insertion sort — optimal for small N
+            // Find median by sorting (N is small: 3, 5, 7, or 9).
             for (size_t a = 1; a < N; ++a) {
-                uint16_t key = scratch[a];
+                uint16_t key = scratch_[a];
                 int b = static_cast<int>(a) - 1;
-                while (b >= 0 && scratch[static_cast<size_t>(b)] > key) {
-                    scratch[static_cast<size_t>(b + 1)] = scratch[static_cast<size_t>(b)];
+                while (b >= 0 && scratch_[static_cast<size_t>(b)] > key) {
+                    scratch_[static_cast<size_t>(b + 1)] = scratch_[static_cast<size_t>(b)];
                     --b;
                 }
-                scratch[static_cast<size_t>(b + 1)] = key;
+                scratch_[static_cast<size_t>(b + 1)] = key;
             }
-            uint16_t median = scratch[N / 2];
+            uint16_t median = scratch_[N / 2];
 
             // Blend between current Y and temporal median based on strength.
-            // At strength=1.0: fully replace noisy pixels with median.
-            // At strength=0.0: no filtering at all.
-            uint16_t y_new = y_cur[i];
-            if (strength_ > 0.0f) {
+            uint16_t y_new = y_current_[i];
+            if (valid_frames_ >= N && strength_ > 0.0f) {
                 int diff = static_cast<int>(y_new) - static_cast<int>(median);
                 int blend = static_cast<int>(strength_ * 255.0f + 0.5f);
                 y_new = static_cast<uint16_t>(
@@ -104,27 +98,19 @@ public:
                 if (y_new > 255) y_new = 255;
             }
 
-            // Write current Y into ring buffer at head position
-            ring_[i * N + head_] = y_new;
+            // Store the processed luminance in the current frame slot. The
+            // slot is shared by every pixel in this frame; head_ advances only
+            // after all pixels have been written below.
+            ring_[i * N + head_] = y_current_[i];
 
-            // Advance head (circular)
-            head_ = (head_ + 1) % N;
-
-            // Write back Y to frame, preserving U/V
-            uint32_t orig = px[i];
-            uint16_t old_y = static_cast<uint16_t>(
-                ((orig & 0xff) * 77 +
-                 ((orig >> 8) & 0xff) * 150 +
-                 ((orig >> 16) & 0xff) * 29 + 128) >> 8);
-            int32_t delta = static_cast<int32_t>(y_new) - static_cast<int32_t>(old_y);
-            uint32_t r = static_cast<uint32_t>(
-                std::clamp(static_cast<int32_t>((orig) & 0xff) + delta, 0, 255));
-            uint32_t g = static_cast<uint32_t>(
-                std::clamp(static_cast<int32_t>(((orig >> 8) & 0xff)) + delta, 0, 255));
-            uint32_t b = static_cast<uint32_t>(
-                std::clamp(static_cast<int32_t>(((orig >> 16) & 0xff)) + delta, 0, 255));
-            dst[i] = (0xff000000u) | (b << 16) | (g << 8) | r;
+            // Write back Y while preserving chroma without channel clipping.
+            const uint32_t orig = px[i];
+            dst[i] = replace_luma_preserve_chroma(orig,
+                                                   static_cast<uint8_t>(y_new));
         }
+
+        head_ = (head_ + 1) % N;
+        if (valid_frames_ < N) ++valid_frames_;
     }
 
     // Set number of temporal frames to buffer (3, 5, 7, or 9; odd only).
@@ -147,8 +133,11 @@ private:
     int w_ = 0, h_ = 0;
     int depth_ = 5;       // 5 frames (~170ms at 30fps)
     float strength_ = 1.0f;  // blend strength 0..1
-    std::vector<uint16_t> ring_;  // circular buffer: [pixel0_frame0, pixel0_frame1, ..., pixelN_frameN-1, pixel1_frame0, ...]
-    int head_ = 0;          // next write position (circular)
+    std::vector<uint16_t> ring_;       // circular buffer, pixel-major
+    std::vector<uint16_t> y_current_;  // current input frame luminance
+    std::vector<uint16_t> scratch_;    // reusable per-pixel sort scratch
+    size_t head_ = 0;                  // next frame slot (circular)
+    size_t valid_frames_ = 0;           // initialized history frames
 };
 
 }  // namespace famidec

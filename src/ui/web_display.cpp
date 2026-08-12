@@ -43,15 +43,10 @@ static void json_escape(std::string& s) {
 }
 
 // Minimal JSON builder — avoids pulling in a full JSON library.
-static std::string json_obj_start() { return "{\n"; }
-static std::string json_obj_end()   { return "\n}"; }
 static std::string json_bool(const char* k, bool v) {
     return std::string("  \"") + k + "\": " + (v ? "true" : "false") + ",\n";
 }
 static std::string json_int(const char* k, int v) {
-    return std::string("  \"") + k + "\": " + std::to_string(v) + ",\n";
-}
-static std::string json_uint(const char* k, uint64_t v) {
     return std::string("  \"") + k + "\": " + std::to_string(v) + ",\n";
 }
 static std::string json_double(const char* k, double v) {
@@ -77,11 +72,6 @@ static std::string json_float(const char* k, float v) {
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%g", v);
     return std::string("  \"") + k + "\": " + buf + ",\n";
-}
-static std::string json_str(const char* k, const std::string& v) {
-    std::string esc(v);
-    json_escape(esc);
-    return std::string("  \"") + k + "\": \"" + esc + "\",\n";
 }
 
 static std::string config_to_json(const Config& cfg) {
@@ -180,7 +170,9 @@ static bool encode_frame_jpeg(const Frame& frame, int quality,
     if (fsize > 0) {
         std::fseek(tmp, 0, SEEK_SET);
         out.resize(static_cast<size_t>(fsize));
-        std::fread(out.data(), 1, out.size(), tmp);
+        if (std::fread(out.data(), 1, out.size(), tmp) != out.size()) {
+            out.clear();
+        }
     }
     std::fclose(tmp);
     return !out.empty();
@@ -215,12 +207,8 @@ static void serve_static_file(httplib::Response& res, const std::string& path) {
 WebDisplay::WebDisplay() : port_(8080) {}
 
 WebDisplay::~WebDisplay() {
-    if (running_.load()) {
-        running_.store(false);
-        if (server_thread_.joinable()) {
-            server_thread_.join();
-        }
-    }
+    request_quit();
+    if (server_thread_.joinable()) server_thread_.join();
 }
 
 #ifdef HAVE_WEBGUI
@@ -248,7 +236,13 @@ bool WebDisplay::init(int, const std::string&) {
 }
 #endif  // HAVE_WEBGUI
 
-void WebDisplay::request_quit() { quit_requested_.store(true); }
+void WebDisplay::request_quit() {
+    quit_requested_.store(true);
+#ifdef HAVE_WEBGUI
+    std::lock_guard<std::mutex> lock(server_mutex_);
+    if (server_) server_->stop();
+#endif
+}
 void WebDisplay::set_target_fps(int fps) { target_fps_ = fps; }
 
 std::string WebDisplay::get_url() const {
@@ -257,7 +251,12 @@ std::string WebDisplay::get_url() const {
 
 #ifdef HAVE_WEBGUI
 void WebDisplay::server_thread_func() {
-    httplib::Server svr;
+    auto server = std::make_unique<httplib::Server>();
+    {
+        std::lock_guard<std::mutex> lock(server_mutex_);
+        server_ = std::move(server);
+    }
+    httplib::Server& svr = *server_;
 
     // ── / → index.html ──
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
@@ -322,7 +321,9 @@ void WebDisplay::server_thread_func() {
         ss << "\"clipping\":" << (s.clipping ? "true" : "false") << ",";
         ss << "\"clkin_locked\":" << (s.clkin_locked ? "true" : "false") << ",";
         ss << "\"freq_mhz\":" << s.freq_mhz << ",";
-        ss << "\"channel\":\"" << s.channel << "\",";
+        std::string channel = s.channel;
+        json_escape(channel);
+        ss << "\"channel\":\"" << channel << "\",";
         ss << "\"fps\":" << s.fps << ",";
         ss << "\"video_latency_ms\":" << s.video_latency_ms;
         ss << "}";
@@ -331,6 +332,7 @@ void WebDisplay::server_thread_func() {
 
     // ── /api/config → JSON (full Config snapshot) ──
     svr.Get("/api/config", [this](const httplib::Request&, httplib::Response& res) {
+        auto config_lock = lock_config();
         if (!cfg_) {
             res.set_content("{}", "application/json");
             res.status = 503;
@@ -351,7 +353,6 @@ void WebDisplay::server_thread_func() {
     };
 
     auto parse_json = [&](const std::string& b) -> std::pair<bool, std::vector<JsonField>> {
-        bool ok = false;
         std::vector<JsonField> fields;
         std::string error;
         size_t p = 0;
@@ -415,7 +416,12 @@ void WebDisplay::server_thread_func() {
         ++p;
         skip_ws();
         while (p < len) {
-            if (src[p] == '}') { ok = true; return {true, fields}; }
+            if (src[p] == '}') {
+                ++p;
+                skip_ws();
+                if (p != len) { error = "Trailing data"; return {false, {}}; }
+                return {true, fields};
+            }
             if (src[p] == ',') { ++p; skip_ws(); continue; }
             // Parse key
             skip_ws();
@@ -445,6 +451,7 @@ void WebDisplay::server_thread_func() {
 
     // ── /api/config/reset → restore startup baseline (including CLI overrides) ──
     svr.Post("/api/config/reset", [this](const httplib::Request&, httplib::Response& res) {
+        auto config_lock = lock_config();
         if (!cfg_ || !reset_cfg_) {
             res.set_content("{\"ok\":false,\"error\":\"no reset baseline\"}", "application/json");
             res.status = 503;
@@ -501,6 +508,7 @@ void WebDisplay::server_thread_func() {
 
     // ── /api/config/set → apply full or partial Config JSON ──
     svr.Post("/api/config/set", [this, parse_json = std::move(parse_json)](const httplib::Request& req, httplib::Response& res) {
+        auto config_lock = lock_config();
         if (!cfg_) {
             res.set_content("{\"ok\":false,\"error\":\"no config\"}", "application/json");
             res.status = 503;
@@ -540,25 +548,29 @@ void WebDisplay::server_thread_func() {
 
         auto push_bool = [&](ConfigChangeType type, bool value) {
             if (!config_queue_) return;
-            ConfigChangeEvent event{type};
+            ConfigChangeEvent event{};
+            event.type = type;
             event.val.bool_val = value;
             config_queue_->push(event);
         };
         auto push_int = [&](ConfigChangeType type, int value) {
             if (!config_queue_) return;
-            ConfigChangeEvent event{type};
+            ConfigChangeEvent event{};
+            event.type = type;
             event.val.int_val = value;
             config_queue_->push(event);
         };
         auto push_double = [&](ConfigChangeType type, double value) {
             if (!config_queue_) return;
-            ConfigChangeEvent event{type};
+            ConfigChangeEvent event{};
+            event.type = type;
             event.val.dbl_val = value;
             config_queue_->push(event);
         };
         auto push_float = [&](ConfigChangeType type, float value) {
             if (!config_queue_) return;
-            ConfigChangeEvent event{type};
+            ConfigChangeEvent event{};
+            event.type = type;
             event.val.flt_val = value;
             config_queue_->push(event);
         };
@@ -696,13 +708,15 @@ void WebDisplay::server_thread_func() {
             source_->set_amp(cfg_->amp);
         }
 
-        if (any_change) save_config_file(*cfg_, cfg_->config_path);
-        std::printf("WebGUI: config set (changed=%d, body=%zu bytes)\n", any_change, body.size());
+        if (any_change) request_restart();
+
+        bool persisted = !any_change || save_config_file(*cfg_, cfg_->config_path);
+        std::printf("WebGUI: config set (changed=%d, persisted=%d, body=%zu bytes)\n", any_change, persisted, body.size());
         std::fflush(stdout);
 
         std::string response = std::string("{\"ok\":") + (any_change ? "true" : "false") +
                                ",\"changed\":" + (any_change ? "true" : "false") +
-                               ",\"persisted\":" + (any_change ? "true" : "false") + "}";
+                               ",\"persisted\":" + (persisted ? "true" : "false") + "}";
         res.set_content(response, "application/json");
     });
 
@@ -760,10 +774,8 @@ void WebDisplay::server_thread_func() {
 
     if (!svr.listen("0.0.0.0", port_)) {
         std::fprintf(stderr, "Failed to listen on port %d\n", port_);
+        running_.store(false);
         return;
-    }
-    while (running_.load() && !quit_requested_.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     running_.store(false);
 }
@@ -797,6 +809,7 @@ void WebDisplay::update_stats(const OsdStats& stats) {
 }
 
 void WebDisplay::apply_config(const std::string& key, const std::string& value) {
+    auto config_lock = lock_config();
     if (!cfg_) {
         std::fprintf(stderr, "WebGUI: no config wired in\n");
         return;
@@ -804,25 +817,29 @@ void WebDisplay::apply_config(const std::string& key, const std::string& value) 
 
     auto push_bool = [&](ConfigChangeType type, bool v) {
         if (!config_queue_) return;
-        ConfigChangeEvent event{type};
+        ConfigChangeEvent event{};
+        event.type = type;
         event.val.bool_val = v;
         config_queue_->push(event);
     };
     auto push_int = [&](ConfigChangeType type, int v) {
         if (!config_queue_) return;
-        ConfigChangeEvent event{type};
+        ConfigChangeEvent event{};
+        event.type = type;
         event.val.int_val = v;
         config_queue_->push(event);
     };
     auto push_double = [&](ConfigChangeType type, double v) {
         if (!config_queue_) return;
-        ConfigChangeEvent event{type};
+        ConfigChangeEvent event{};
+        event.type = type;
         event.val.dbl_val = v;
         config_queue_->push(event);
     };
     auto push_float = [&](ConfigChangeType type, float v) {
         if (!config_queue_) return;
-        ConfigChangeEvent event{type};
+        ConfigChangeEvent event{};
+        event.type = type;
         event.val.flt_val = v;
         config_queue_->push(event);
     };
@@ -880,6 +897,7 @@ void WebDisplay::apply_config(const std::string& key, const std::string& value) 
     }
 
     save_config_file(*cfg_, cfg_->config_path);
+    request_restart();
     std::printf("Web config: %s = %s\n", key.c_str(), value.c_str());
     std::fflush(stdout);
 }

@@ -406,9 +406,7 @@ void NtscDecoder::decode_row(double edge) {
             std::memory_order_relaxed);
         
         // Store active line duration (in microseconds)
-        const double active_start_offset = 9.4 * samples_per_us_;
-        const double active_end_offset = active_start_offset + 52.6;
-        double active_us = active_end_offset - active_start_offset;
+        const double active_us = 52.6;
         stats_.detected_active_us.store(active_us,
                                         std::memory_order_relaxed);
         

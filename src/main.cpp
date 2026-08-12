@@ -15,6 +15,7 @@
 
 #include "config.hpp"
 #include "config_store.hpp"
+#include "runtime_control.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
 #include "dsp/fm_detector.hpp"
@@ -541,7 +542,11 @@ void dsp_thread(ConfigChangeQueue* events,
         }
 
         size_t n = src->read(raw.data(), raw.size() - (raw.size() % bytes_per_sample));
-        if (n == 0) break;
+        if (n == 0) {
+            if (src->failed())
+                std::fprintf(stderr, "input source stopped with error: %s\n", src->error().c_str());
+            break;
+        }
         rec->write(raw.data(), n);
         size_t ns = n / bytes_per_sample;
         if (src->sample_format() == SampleFormat::CS16) {
@@ -552,7 +557,9 @@ void dsp_thread(ConfigChangeQueue* events,
             }
         } else {
             for (size_t i = 0; i < ns; ++i) {
-                std::complex<float> c(static_cast<int8_t>(raw[2 * i]) / 128.0f, static_cast<int8_t>(raw[2 * i + 1]) / 128.0f);
+                std::complex<float> c(
+                    static_cast<float>(static_cast<int8_t>(raw[2 * i])) / 128.0f,
+                    static_cast<float>(static_cast<int8_t>(raw[2 * i + 1])) / 128.0f);
                 iq[i] = dcb.process(c);
             }
         }
@@ -587,6 +594,7 @@ int run_spectrum(const Config& cfg, ISampleSource* src) {
 } // namespace
 
 int run_application(Config& cfg, const Config& startup_baseline) {
+    RuntimeControl runtime(cfg);
 
     std::unique_ptr<ISampleSource> src;
     HackRfSource* hackrf = nullptr;
@@ -637,22 +645,22 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                     hackrf->check_clkin() ? "locked (external clock)" : "unlocked (internal oscillator)",
                     cfg.enforce_clkin && hackrf->check_clkin() ? " [enforced]" : "");
     }
-#ifdef HAVE_SOAPYSDR
     std::string source_name;
     if (cfg.input == Config::Input::HackRF) source_name = "HackRF";
+#ifdef HAVE_SOAPYSDR
     else if (cfg.input == Config::Input::SoapySDR) {
         source_name = "SoapySDR";
         if (soapysdr) source_name += " (" + soapysdr->device_info() + ")";
-    } else if (cfg.input == Config::Input::UHD) {
+    }
+#endif
+#ifdef HAVE_UHD
+    else if (cfg.input == Config::Input::UHD) {
         source_name = "UHD";
         if (uhd) source_name += " (" + uhd->device_info() + ")";
-    } else source_name = cfg.file_path;
-    std::printf("input: %s   format %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", source_name.c_str(), sample_format_name(src->sample_format()), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
-#else
-    const char* input_name = cfg.input == Config::Input::HackRF ? "HackRF" :
-                             (cfg.input == Config::Input::UHD ? "UHD" : cfg.file_path.c_str());
-    std::printf("input: %s   format %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", input_name, sample_format_name(src->sample_format()), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
+    }
 #endif
+    else source_name = cfg.file_path;
+    std::printf("input: %s   format %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", source_name.c_str(), sample_format_name(src->sample_format()), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
 
     if (cfg.spectrum) {
         int rc = run_spectrum(cfg, src.get());
@@ -673,7 +681,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
 
     // Auto-resolution: detect before starting DSP thread
     Config auto_cfg = cfg;
-    if (cfg.auto_detect) {
+    if (cfg.auto_detect && !cfg.auto_res_applied) {
         // Start DSP briefly to detect resolution
         TripleBuffer tmp_tb;
         tmp_tb.resize(cfg.frame_width, cfg.frame_height);
@@ -885,7 +893,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                 return 1;
             }
             // Wire in config + source so /api/set can control hardware.
-            web_disp.set_source_and_config(&cfg, src.get(), &startup_baseline);
+            web_disp.set_source_and_config(&cfg, src.get(), &startup_baseline, &runtime);
             web_disp.set_config_queue(&web_events_store);
             web_disp.set_config_queue(&web_events_store);
 
@@ -958,7 +966,9 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             uint64_t last_clip_count = 0;
 
             while (g_running.load(std::memory_order_relaxed)) {
+                auto config_lock = runtime.lock();
                 if (web_disp.restart_requested() || g_restart_requested.load(std::memory_order_acquire)) {
+                    config_lock.unlock();
                     std::printf("WebGUI: full application reinitialization requested\n");
                     g_restart_requested.store(false, std::memory_order_release);
                     g_running.store(false, std::memory_order_relaxed);
@@ -999,8 +1009,10 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                         cfg.frame_width = target_width;
                         cfg.frame_height = target_height;
                         cfg.auto_res_applied = true;
-                        tb.resize(cfg.frame_width, cfg.frame_height);
-                        pipeline.init(cfg.frame_width, cfg.frame_height);
+                        // Resolution changes are structural. Let the common
+                        // restart path rebuild buffers and filters after all
+                        // producer threads have stopped.
+                        web_disp.request_restart();
                         std::printf("AUTO-RES: detected %s (chroma=%.2f MHz, %d active lines, "
                                    "horiz_detail=%d, line_rate=%.3f kHz)\n  -> %dx%d\n",
                                    is_pal ? "PAL" : "NTSC", chroma_hz / 1e6, active_lines,
@@ -1052,9 +1064,11 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                     st.video_latency_ms = 0;  // no reliable latency calc in Web mode
 
                     if (cfg.frame_width != last_pipeline_width || cfg.frame_height != last_pipeline_height) {
-                        tb.resize(cfg.frame_width, cfg.frame_height);
-                        rebuild_web_pipeline();
-                        std::printf("WebGUI: resolution applied %dx%d\n", cfg.frame_width, cfg.frame_height);
+                        // Resolution changes are structural. Restart the whole
+                        // application rather than resizing buffers while DSP
+                        // may still be writing into a published frame.
+                        web_disp.request_restart();
+                        continue;
                     }
 
                     // Config state for Web GUI read-back
@@ -1309,19 +1323,13 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                 mcfg.frame_width = target_width;
                 mcfg.frame_height = target_height;
                 mcfg.auto_res_applied = true;
-                
-                // Resize the pipeline and filters
-                tb.resize(mcfg.frame_width, mcfg.frame_height);
-                pipeline.init(mcfg.frame_width, mcfg.frame_height);
-                disp.rebuild_crt_lut(mcfg.frame_width, mcfg.frame_height);
-                
-                // Report what we detected
+                // Resolution changes are structural. Stop the current run and
+                // let the outer restart path rebuild all frame/display state.
+                g_restart_requested.store(true, std::memory_order_release);
                 std::printf("AUTO-RES: detected %s (chroma=%.2f MHz, %d active lines, "
-                           "horiz_detail=%d, line_rate=%.3f kHz)\n",
-                           is_pal ? "PAL" : "NTSC",
-                           chroma_hz / 1e6, active_lines,
-                           horiz_detail, line_rate_mhz / 1000.0);
-                std::printf("  -> applying resolution: %dx%d\n", 
+                           "horiz_detail=%d, line_rate=%.3f kHz)\n  -> %dx%d\n",
+                           is_pal ? "PAL" : "NTSC", chroma_hz / 1e6, active_lines,
+                           horiz_detail, line_rate_mhz / 1000.0,
                            mcfg.frame_width, mcfg.frame_height);
                 std::fflush(stdout);
             }

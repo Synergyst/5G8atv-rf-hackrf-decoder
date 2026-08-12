@@ -12,6 +12,26 @@
 
 namespace famidec {
 
+// Adjust RGB luminance while preserving chroma in BT.601-like YUV space.
+// Reconstructing RGB from Y/U/V avoids the channel-wise clipping artifacts
+// caused by simply adding a luma delta independently to R, G and B.
+inline uint32_t replace_luma_preserve_chroma(uint32_t pixel, uint8_t new_y) {
+    const float r = static_cast<float>(pixel & 0xffu);
+    const float g = static_cast<float>((pixel >> 8) & 0xffu);
+    const float b = static_cast<float>((pixel >> 16) & 0xffu);
+    const float y = 0.299f * r + 0.587f * g + 0.114f * b;
+    const float u = (b - y) / 1.772f;
+    const float v = (r - y) / 1.402f;
+    const float yy = static_cast<float>(new_y);
+    const auto q = [](float x) -> uint32_t {
+        return static_cast<uint32_t>(std::clamp(x, 0.0f, 255.0f) + 0.5f);
+    };
+    const uint32_t rr = q(yy + 1.402f * v);
+    const uint32_t gg = q(yy - 0.344136f * u - 0.714136f * v);
+    const uint32_t bb = q(yy + 1.772f * u);
+    return 0xff000000u | (bb << 16) | (gg << 8) | rr;
+}
+
 // ─── IFilter ─────────────────────────────────────────────────────────────────
 // Base class for all video filters. Every filter operates in-place on a Frame.
 // The pipeline calls process() in registration order.

@@ -46,6 +46,7 @@ public:
     // Reconfigure stream-level parameters after cfg has been updated. Backends
     // may stop/recreate their hardware stream internally.
     virtual bool restart() { return false; }
+    virtual bool failed() const { return !error().empty(); }
 
 private:
     std::string empty_error_;

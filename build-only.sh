@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd /home/dragonos/Sources/5G8atv-rf-hackrf-decoder
+cd "$(dirname "$(readlink -f "$0")")"
 
 echo "=== Compile (ie: all, webgui, soapysdr, or default) ==="
 # Build (normal + WebGUI)

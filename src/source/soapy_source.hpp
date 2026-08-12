@@ -51,6 +51,7 @@ public:
     const std::string& device_info() const { return device_info_; }
     static std::vector<std::string> enumerate_devices();
     const std::string& error() const override { return error_; }
+    bool failed() const override { return !error_.empty() && !running_.load(std::memory_order_acquire); }
 
 private:
     bool configure_gains_locked();

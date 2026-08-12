@@ -50,6 +50,7 @@ public:
     bool set_amp(bool on) override;
 
     const std::string& error() const override { return error_; }
+    bool failed() const override { return !error_.empty() && !running_.load(std::memory_order_acquire); }
     const std::string& device_info() const { return device_info_; }
 
 private:

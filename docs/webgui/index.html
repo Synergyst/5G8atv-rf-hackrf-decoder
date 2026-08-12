@@ -536,7 +536,7 @@
 
       slider.addEventListener('input', (e) => {
         valEl.textContent = fmt(e.target.value);
-        queueConfig(configKey, e.target.value);
+        if (configKey) queueConfig(configKey, e.target.value);
         configDirty = true;
         if (onInputCb) onInputCb(e.target.value);
       });
@@ -792,8 +792,14 @@
       bindSlider('hue-deg', 'hue-deg-val', 'hue_deg', v => v + '°');
 
       // Denoise
-      bindSlider('denoise', 'denoise-val', 'denoise', v => v + '%');
-      bindSlider('denoise-temporal', 'denoise-temporal-val', 'denoise_temporal', v => v + '%');
+      bindSlider('denoise', 'denoise-val', null, v => v + '%', v => {
+        queueConfig('denoise', Number(v) / 100);
+        configDirty = true;
+      });
+      bindSlider('denoise-temporal', 'denoise-temporal-val', null, v => v + '%', v => {
+        queueConfig('denoise_temporal', Number(v) / 100);
+        configDirty = true;
+      });
       bindSlider('denoise-med', 'denoise-med-val', null, v => {
         const n = parseInt(v);
         return n === 0 ? 'Off' : (n + 1);
@@ -802,6 +808,10 @@
         queueConfig('denoise_temporal_median', n === 0 ? 0 : (n + 1));
         configDirty = true;
         sendConfigBatch();
+      });
+      bindSlider('denoise-med-strength', 'denoise-med-strength-val', 'denoise_temporal_median_strength', v => (Number(v) / 100).toFixed(2), v => {
+        queueConfig('denoise_temporal_median_strength', Number(v) / 100);
+        configDirty = true;
       });
 
       // Resolution

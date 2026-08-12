@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
 #include <string>
 
 #include <libhackrf/hackrf.h>
@@ -49,10 +50,13 @@ public:
     // Fed by the same strided scan as the clip counter, for the gain AGC.
     int take_peak() { return peak_.exchange(0, std::memory_order_relaxed); }
 
-    const std::string& error() const { return error_; }
+    const std::string& error() const override { return error_; }
 
 private:
     static int rx_callback(hackrf_transfer* transfer);
+    void cleanup_device();
+    void set_error(const char* operation, int result);
+    void append_error(const char* operation, int result);
 
     const Config& cfg_;
     hackrf_device* dev_ = nullptr;
@@ -64,6 +68,12 @@ private:
     std::atomic<bool> running_{false};
     int lna_, vga_;
     std::string error_;
+
+    // All libhackrf lifecycle calls are serialized. running_ is published to
+    // the USB callback before start and cleared before stop_rx/close.
+    mutable std::mutex lifecycle_mutex_;
+    bool library_initialized_ = false;
+    bool streaming_ = false;
 };
 
 }  // namespace famidec

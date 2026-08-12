@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 namespace famidec {
@@ -13,7 +14,8 @@ namespace famidec {
 class SpscRing {
 public:
     explicit SpscRing(size_t capacity) : buf_(capacity), mask_(capacity - 1) {
-        // capacity must be power of two
+        if (capacity == 0 || (capacity & (capacity - 1)) != 0)
+            throw std::invalid_argument("SpscRing capacity must be a power of two");
     }
 
     size_t capacity() const { return buf_.size(); }
@@ -30,7 +32,8 @@ public:
 
     // Producer: push all-or-nothing. Returns false (drop) if not enough room.
     bool push(const uint8_t* data, size_t len) {
-        if (writable() < len) return false;
+        if (len == 0) return true;
+        if (!data || len > capacity() || writable() < len) return false;
         uint64_t h = head_.load(std::memory_order_relaxed);
         size_t idx = h & mask_;
         size_t first = std::min(len, buf_.size() - idx);
@@ -42,6 +45,7 @@ public:
 
     // Consumer: pop up to len bytes, returns bytes actually popped.
     size_t pop(uint8_t* out, size_t len) {
+        if (len == 0 || !out) return 0;
         size_t avail = readable();
         size_t n = std::min(avail, len);
         if (n == 0) return 0;

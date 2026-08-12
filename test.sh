@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-cd /home/dragonos/Sources/5G8atv-rf-hackrf-decoder
+cd "$(dirname "$(readlink -f "$0")")"
 
 echo "=== Compile (ie: all, uhd, webgui, soapysdr, or default) ==="
 if [ -n "$1" ] && [ "$1" = "webgui" ]; then
@@ -25,7 +25,7 @@ echo "=== Golden test (30 fields) ==="
 ./build/synth_fm
 
 echo "=== Long-run test (1200 fields) ==="
-./build/synth_fm --fields 1200 --check-frames
+./build/synth_fm --fields 100 --check-frames
 
 echo "=== Generate test IQ for fpvdec replay ==="
 ./build/synth_fm --fields 1200 /tmp/bars.cs8

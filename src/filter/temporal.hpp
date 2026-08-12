@@ -26,8 +26,11 @@ public:
     void init(int width, int height) override {
         w_ = width;
         h_ = height;
-        // Allocate previous frame buffer
-        prev_frame_.resize(static_cast<size_t>(w_) * h_, 0);
+        const size_t num_pixels = static_cast<size_t>(w_) * static_cast<size_t>(h_);
+        // Allocate previous frame and current-frame scratch buffers once.
+        prev_frame_.resize(num_pixels, 0);
+        y_current_.resize(num_pixels);
+        initialized_ = false;
     }
 
     void process(Frame& frame) override {
@@ -44,15 +47,29 @@ public:
 
         const uint32_t* px = frame.rgba.data();
 
+        // Initialize history from the first frame. Starting from black would
+        // create a visible fade/flash whenever the filter is enabled or rebuilt.
+        if (!initialized_) {
+            for (size_t i = 0; i < N; ++i) {
+                uint32_t p = px[i];
+                int r = static_cast<int>(p) & 0xff;
+                int g = static_cast<int>((p >> 8) & 0xff);
+                int b = static_cast<int>((p >> 16) & 0xff);
+                y_current_[i] = static_cast<uint16_t>((r * 77 + g * 150 + b * 29 + 128) >> 8);
+            }
+            prev_frame_ = y_current_;
+            initialized_ = true;
+            return;
+        }
+
         // Compute Y for current frame
-        std::vector<uint16_t> y_current(N);
         for (size_t i = 0; i < N; ++i) {
             uint32_t p = px[i];
             int r = static_cast<int>(p) & 0xff;
             int g = static_cast<int>((p >> 8)) & 0xff;
             int b = static_cast<int>((p >> 16)) & 0xff;
             int y16 = (r * 77 + g * 150 + b * 29 + 128) >> 8;
-            y_current[i] = static_cast<uint16_t>(std::clamp(y16, 0, 255));
+            y_current_[i] = static_cast<uint16_t>(std::clamp(y16, 0, 255));
         }
 
         // Blend with previous frame: Y_new = alpha * Y_cur + (1 - alpha) * Y_prev
@@ -67,37 +84,32 @@ public:
         uint32_t* dst = const_cast<uint32_t*>(px);
         for (size_t i = 0; i < N; ++i) {
             uint16_t y_new = static_cast<uint16_t>(
-                (alpha_int * static_cast<int>(y_current[i]) +
+                (alpha_int * static_cast<int>(y_current_[i]) +
                  prev_int * static_cast<int>(prev_frame_[i]) + 128) >> 8);
             prev_frame_[i] = y_new;
 
-            // Write back Y into frame pixels, preserving U/V
-            uint32_t orig = px[i];
-            uint16_t old_y = static_cast<uint16_t>(
-                ((orig & 0xff) * 77 +
-                 ((orig >> 8) & 0xff) * 150 +
-                 ((orig >> 16) & 0xff) * 29 + 128) >> 8);
-            int32_t delta = static_cast<int32_t>(y_new) - static_cast<int32_t>(old_y);
-            uint32_t r = static_cast<uint32_t>(
-                std::clamp(static_cast<int32_t>((orig) & 0xff) + delta, 0, 255));
-            uint32_t g = static_cast<uint32_t>(
-                std::clamp(static_cast<int32_t>(((orig >> 8) & 0xff)) + delta, 0, 255));
-            uint32_t b = static_cast<uint32_t>(
-                std::clamp(static_cast<int32_t>(((orig >> 16) & 0xff)) + delta, 0, 255));
-            dst[i] = (0xff000000u) | (b << 16) | (g << 8) | r;
+            // Write back Y while preserving chroma without channel clipping.
+            dst[i] = replace_luma_preserve_chroma(px[i],
+                                                   static_cast<uint8_t>(y_new));
         }
     }
 
-    // Set temporal alpha (0.0 = heavy smoothing, 1.0 = off)
-    void set_alpha(float a) { alpha_ = std::clamp(1.0f - a, 0.0f, 1.0f); }
+    // Public value is denoise strength: 0 = off, 1 = maximum history.
+    void set_alpha(float strength) {
+        strength_ = std::clamp(strength, 0.0f, 1.0f);
+        alpha_ = 1.0f - strength_;
+    }
 
     const char* name() const override { return "temporal"; }
     bool needs_reference_frame() const override { return true; }
 
 private:
     int w_ = 0, h_ = 0;
-    float alpha_ = 0.85f;  // default: responsive temporal IIR
+    float strength_ = 0.0f; // public denoise strength, 0 = off
+    float alpha_ = 1.0f;    // current-frame weight
     std::vector<uint16_t> prev_frame_;  // previous frame Y values
+    std::vector<uint16_t> y_current_;   // current frame Y values
+    bool initialized_ = false;
 };
 
 }  // namespace famidec

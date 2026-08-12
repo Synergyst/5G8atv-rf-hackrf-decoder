@@ -10,6 +10,10 @@
 #include <vector>
 
 #include "../config.hpp"
+#include "../runtime_control.hpp"
+#ifdef HAVE_WEBGUI
+namespace httplib { class Server; }
+#endif
 #include "../dsp/frame.hpp"
 #include "../source/sample_source.hpp"
 #include "sdl_display.hpp"
@@ -35,20 +39,26 @@ public:
     void update_stats(const OsdStats& stats);
 
     void set_source_and_config(Config* cfg, ISampleSource* src,
-                               const Config* reset_cfg = nullptr) {
+                               const Config* reset_cfg = nullptr,
+                               RuntimeControl* runtime = nullptr) {
         cfg_ = cfg;
         source_ = src;
         reset_cfg_ = reset_cfg;
+        runtime_ = runtime;
     }
 
     void set_config_queue(ConfigChangeQueue* queue) {
         config_queue_ = queue;
     }
 
+    std::unique_lock<std::mutex> lock_config() const {
+        return runtime_ ? runtime_->lock() : std::unique_lock<std::mutex>();
+    }
+
+
 private:
     void server_thread_func();
     void apply_config(const std::string& key, const std::string& value);
-    bool reset_config();
 
     int port_;
     std::atomic<bool> running_{false};
@@ -63,11 +73,16 @@ private:
     std::chrono::steady_clock::time_point last_stats_update_;
 
     std::thread server_thread_;
+#ifdef HAVE_WEBGUI
+    std::mutex server_mutex_;
+    std::unique_ptr<httplib::Server> server_;
+#endif
 
     Config* cfg_ = nullptr;
     ISampleSource* source_ = nullptr;
     const Config* reset_cfg_ = nullptr;
     ConfigChangeQueue* config_queue_ = nullptr;
+    RuntimeControl* runtime_ = nullptr;
 };
 
 } // namespace famidec

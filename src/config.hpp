@@ -54,8 +54,10 @@ public:
     }
 
     void push(const std::vector<ConfigChangeEvent>& src_events) {
-        for (auto& e : src_events) {
-            if (events_.size() < 100) events_.push_back(e);
+        std::lock_guard<std::mutex> lk(mu_);
+        for (const auto& e : src_events) {
+            if (events_.size() >= 100) break;
+            events_.push_back(e);
         }
     }
 
