@@ -15,38 +15,8 @@
 
 #include "config.hpp"
 #include "config_store.hpp"
-#include "runtime_control.hpp"
-#include "runtime_lifecycle.hpp"
-#include "runtime_session.hpp"
-#include "runtime_coordinator.hpp"
-#include "runtime_modes.hpp"
-#include "runtime_recording.hpp"
-#include "dsp/dc_blocker.hpp"
-#include "dsp/fir.hpp"
-#include "dsp/fm_detector.hpp"
-#include "dsp/frame.hpp"
-#include "dsp/nco.hpp"
-#include "dsp/ntsc_decoder.hpp"
-#include "filter/denoiser.hpp"
-#include "filter/filter.hpp"
-#include "filter/temporal.hpp"
-#include "filter/temporal_median.hpp"
-#include "source/file_source.hpp"
-#include "source/hackrf_source.hpp"
-#include "source/sample_source.hpp"
-#ifdef HAVE_UHD
-#include "source/uhd_source.hpp"
-#endif
-#ifdef HAVE_SOAPYSDR
-#include "source/soapy_source.hpp"
-#endif
-#include "ui/sdl_display.hpp"
-#include "ui/gui_manager.hpp"
-#ifdef HAVE_WEBGUI
-#include "ui/web_display.hpp"
-#endif
+#include "application_runner.hpp"
 #include "util/fpv_channels.hpp"
-#include "util/spectrum.hpp"
 
 using namespace famidec;
 
@@ -348,7 +318,6 @@ bool parse_args(int argc, char** argv, Config* cfg) {
 
 } // namespace
 
-#include "application_runner.hpp"
 
 int main(int argc, char** argv) {
     Config defaults;
