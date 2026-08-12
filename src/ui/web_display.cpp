@@ -332,12 +332,12 @@ void WebDisplay::server_thread_func() {
 
     // ── /api/config → JSON (full Config snapshot) ──
     svr.Get("/api/config", [this](const httplib::Request&, httplib::Response& res) {
-        if (!cfg_) {
+        if (!runtime_) {
             res.set_content("{}", "application/json");
             res.status = 503;
             return;
         }
-        const Config snapshot = runtime_ ? runtime_->snapshot() : *cfg_;
+        const Config snapshot = runtime_->snapshot();
         res.set_content(config_to_json(snapshot), "application/json");
     });
 
@@ -451,54 +451,54 @@ void WebDisplay::server_thread_func() {
 
     // ── /api/config/reset → restore startup baseline (including CLI overrides) ──
     svr.Post("/api/config/reset", [this](const httplib::Request&, httplib::Response& res) {
-        if (!cfg_ || !reset_cfg_) {
+        if (!runtime_ || !have_reset_cfg_) {
             res.set_content("{\"ok\":false,\"error\":\"no reset baseline\"}", "application/json");
             res.status = 503;
             return;
         }
-        if (runtime_) runtime_->with_config([this](Config& c) { c = *reset_cfg_; });
-        else *cfg_ = *reset_cfg_;
+        if (runtime_) runtime_->with_config([this](Config& c) { c = reset_cfg_; });
+        else reset_cfg_ = reset_cfg_;
         auto push_bool = [&](ConfigChangeType type, bool value) {
-            if (!config_queue_) return;
-            ConfigChangeEvent event{}; event.type = type; event.val.bool_val = value; config_queue_->push(event);
+            ConfigChangeEvent event{}; event.type = type; event.val.bool_val = value;
+            if (runtime_) runtime_->submit(event); else if (config_queue_) config_queue_->push(event);
         };
         auto push_int = [&](ConfigChangeType type, int value) {
-            if (!config_queue_) return;
-            ConfigChangeEvent event{}; event.type = type; event.val.int_val = value; config_queue_->push(event);
+            ConfigChangeEvent event{}; event.type = type; event.val.int_val = value;
+            if (runtime_) runtime_->submit(event); else if (config_queue_) config_queue_->push(event);
         };
         auto push_double = [&](ConfigChangeType type, double value) {
-            if (!config_queue_) return;
-            ConfigChangeEvent event{}; event.type = type; event.val.dbl_val = value; config_queue_->push(event);
+            ConfigChangeEvent event{}; event.type = type; event.val.dbl_val = value;
+            if (runtime_) runtime_->submit(event); else if (config_queue_) config_queue_->push(event);
         };
         auto push_float = [&](ConfigChangeType type, float value) {
-            if (!config_queue_) return;
-            ConfigChangeEvent event{}; event.type = type; event.val.flt_val = value; config_queue_->push(event);
+            ConfigChangeEvent event{}; event.type = type; event.val.flt_val = value;
+            if (runtime_) runtime_->submit(event); else if (config_queue_) config_queue_->push(event);
         };
-        push_double(CFG_FM_DEV, reset_cfg_->fm_dev_hz);
-        push_bool(CFG_INVERT, reset_cfg_->invert);
-        push_double(CFG_VIDEO_LPF, reset_cfg_->video_lpf_hz);
-        push_bool(CFG_AFC, reset_cfg_->afc);
-        push_float(CFG_SATURATION, reset_cfg_->saturation);
-        push_float(CFG_HUE_DEG, reset_cfg_->hue_deg);
-        push_float(CFG_OVERSCAN, reset_cfg_->overscan);
-        push_float(CFG_DENOISE, reset_cfg_->denoise);
-        push_float(CFG_DENOISE_TEMPORAL, reset_cfg_->denoise_temporal);
-        push_int(CFG_DENOISE_MEDIAN, reset_cfg_->denoise_temporal_median);
-        push_float(CFG_DENOINE_MEDIAN_STRENGTH, reset_cfg_->denoise_temporal_median_strength);
-        push_double(CFG_SAMPLE_RATE, reset_cfg_->sample_rate);
-        push_int(CFG_SAMPLE_BITS, reset_cfg_->sample_bits);
-        push_double(CFG_VIDEO_CARRIER, reset_cfg_->video_carrier_hz);
-        push_double(CFG_OFFSET_HZ, reset_cfg_->offset_hz);
-        push_bool(CFG_GAIN_AUTO, reset_cfg_->gain_auto);
-        push_int(CFG_LNA_GAIN, reset_cfg_->lna_gain);
-        push_int(CFG_VGA_GAIN, reset_cfg_->vga_gain);
-        push_bool(CFG_AMP, reset_cfg_->amp);
-        push_int(CFG_FRAME_WIDTH, reset_cfg_->frame_width);
-        push_int(CFG_FRAME_HEIGHT, reset_cfg_->frame_height);
-        push_bool(CFG_AUTO_DETECT, reset_cfg_->auto_detect);
-        push_bool(CFG_CLkout, reset_cfg_->clkout);
-        push_bool(CFG_ENFORCE_CLKIN, reset_cfg_->enforce_clkin);
-        bool persisted = save_config_file(*reset_cfg_, reset_cfg_->config_path);
+        push_double(CFG_FM_DEV, reset_cfg_.fm_dev_hz);
+        push_bool(CFG_INVERT, reset_cfg_.invert);
+        push_double(CFG_VIDEO_LPF, reset_cfg_.video_lpf_hz);
+        push_bool(CFG_AFC, reset_cfg_.afc);
+        push_float(CFG_SATURATION, reset_cfg_.saturation);
+        push_float(CFG_HUE_DEG, reset_cfg_.hue_deg);
+        push_float(CFG_OVERSCAN, reset_cfg_.overscan);
+        push_float(CFG_DENOISE, reset_cfg_.denoise);
+        push_float(CFG_DENOISE_TEMPORAL, reset_cfg_.denoise_temporal);
+        push_int(CFG_DENOISE_MEDIAN, reset_cfg_.denoise_temporal_median);
+        push_float(CFG_DENOINE_MEDIAN_STRENGTH, reset_cfg_.denoise_temporal_median_strength);
+        push_double(CFG_SAMPLE_RATE, reset_cfg_.sample_rate);
+        push_int(CFG_SAMPLE_BITS, reset_cfg_.sample_bits);
+        push_double(CFG_VIDEO_CARRIER, reset_cfg_.video_carrier_hz);
+        push_double(CFG_OFFSET_HZ, reset_cfg_.offset_hz);
+        push_bool(CFG_GAIN_AUTO, reset_cfg_.gain_auto);
+        push_int(CFG_LNA_GAIN, reset_cfg_.lna_gain);
+        push_int(CFG_VGA_GAIN, reset_cfg_.vga_gain);
+        push_bool(CFG_AMP, reset_cfg_.amp);
+        push_int(CFG_FRAME_WIDTH, reset_cfg_.frame_width);
+        push_int(CFG_FRAME_HEIGHT, reset_cfg_.frame_height);
+        push_bool(CFG_AUTO_DETECT, reset_cfg_.auto_detect);
+        push_bool(CFG_CLkout, reset_cfg_.clkout);
+        push_bool(CFG_ENFORCE_CLKIN, reset_cfg_.enforce_clkin);
+        bool persisted = save_config_file(reset_cfg_, reset_cfg_.config_path);
         request_restart();
         std::printf("WebGUI: reset to startup baseline; full restart requested (persisted=%d)\n", persisted);
         std::fflush(stdout);
@@ -508,12 +508,12 @@ void WebDisplay::server_thread_func() {
 
     // ── /api/config/set → apply full or partial Config JSON ──
     svr.Post("/api/config/set", [this, parse_json = std::move(parse_json)](const httplib::Request& req, httplib::Response& res) {
-        if (!cfg_) {
+        if (!runtime_) {
             res.set_content("{\"ok\":false,\"error\":\"no config\"}", "application/json");
             res.status = 503;
             return;
         }
-        Config pending = runtime_ ? runtime_->snapshot() : *cfg_;
+        Config pending = runtime_->snapshot();
         const std::string& body = req.body;
         if (body.empty()) {
             res.set_content("{\"ok\":false,\"error\":\"empty body\"}", "application/json");
@@ -809,11 +809,11 @@ void WebDisplay::update_stats(const OsdStats& stats) {
 }
 
 void WebDisplay::apply_config(const std::string& key, const std::string& value) {
-    if (!cfg_) {
+    if (!runtime_) {
         std::fprintf(stderr, "WebGUI: no config wired in\n");
         return;
     }
-    Config pending = runtime_ ? runtime_->snapshot() : *cfg_;
+    Config pending = runtime_->snapshot();
 
     auto push_bool = [&](ConfigChangeType type, bool v) {
         if (!config_queue_) return;

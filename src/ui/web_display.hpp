@@ -42,13 +42,12 @@ public:
     void update_frame(const Frame* frame);
     void update_stats(const OsdStats& stats);
 
-    void set_source_and_config(Config* cfg, ISampleSource* src,
+    void set_source_and_config(ISampleSource* src,
                                const Config* reset_cfg = nullptr,
                                RuntimeControl* runtime = nullptr,
                                RuntimeLifecycle* lifecycle = nullptr) {
-        cfg_ = cfg;
         source_ = src;
-        reset_cfg_ = reset_cfg;
+        if (reset_cfg) { reset_cfg_ = *reset_cfg; have_reset_cfg_ = true; }
         runtime_ = runtime;
         lifecycle_ = lifecycle;
     }
@@ -84,9 +83,9 @@ private:
     std::unique_ptr<httplib::Server> server_;
 #endif
 
-    Config* cfg_ = nullptr;
     ISampleSource* source_ = nullptr;
-    const Config* reset_cfg_ = nullptr;
+    Config reset_cfg_{};
+    bool have_reset_cfg_ = false;
     ConfigChangeQueue* config_queue_ = nullptr;
     RuntimeControl* runtime_ = nullptr;
     RuntimeLifecycle* lifecycle_ = nullptr;

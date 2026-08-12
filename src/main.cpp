@@ -916,7 +916,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                 return 1;
             }
             // Wire in config + source so /api/set can control hardware.
-            web_disp.set_source_and_config(&cfg, src.get(), &startup_baseline, &runtime, &lifecycle);
+            web_disp.set_source_and_config(src.get(), &startup_baseline, &runtime, &lifecycle);
             web_disp.set_config_queue(&web_events_store);
             web_disp.set_config_queue(&web_events_store);
 
