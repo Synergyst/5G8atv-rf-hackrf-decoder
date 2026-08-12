@@ -337,7 +337,7 @@ int main(int argc, char** argv) {
     if (!parse_args(argc, argv, &startup_baseline)) return 2;
 
     for (;;) {
-        g_running.store(true, std::memory_order_relaxed);
+        // The application runner owns per-run lifecycle state.
         int rc = run_application(cfg, startup_baseline);
         if (rc != 75) return rc;
 

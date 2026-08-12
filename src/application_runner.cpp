@@ -50,7 +50,7 @@
 
 namespace famidec {
 
-std::atomic<bool> g_running{true};
+
 
 namespace {
 void write_ppm(const Frame& f, const std::string& path) {
@@ -101,7 +101,8 @@ int run_application(Config& cfg, const Config& startup_baseline) {
     RuntimeLifecycle lifecycle;
     RuntimeSession session(cfg, runtime, lifecycle);
 
-    RuntimeCoordinator coordinator(cfg, runtime, lifecycle, g_running);
+    lifecycle.start();
+    RuntimeCoordinator coordinator(cfg, runtime, lifecycle, lifecycle.running_ref());
     if (!coordinator.create_source(!cfg.headless && !cfg.spectrum)) {
         std::fprintf(stderr, "failed to create input source\n");
         return 1;
@@ -194,7 +195,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         src->pause();
         coordinator.stop_dsp();
         src->resume();
-        g_running.store(true, std::memory_order_relaxed);
+        lifecycle.start();
         
         // Apply detected resolution
         double chroma_hz = tmp_dec.stats().detected_chroma_hz.load(std::memory_order_acquire);
@@ -264,7 +265,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         // A restart request is handled by the same outer lifecycle loop as
         // WebUI; debug mode must not continue using stale DSP state.
         // SIGINT handler: set g_running false so the DSP thread exits cleanly.
-        std::signal(SIGINT, [](int) { g_running.store(false, std::memory_order_relaxed); });
+        std::signal(SIGINT, [](int) { /* lifecycle is stopped by the main loop */ });
 
         uint64_t prev_frames = 0;
         uint64_t prev_lines = 0;
@@ -276,7 +277,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         std::printf("[DEBUG MODE] Running... Ctrl+C to stop.\n");
         std::fflush(stdout);
 
-        while (g_running.load(std::memory_order_relaxed)) {
+        while (lifecycle.running()) {
             // Check duration limit
             if (cfg.debug_duration_sec > 0) {
                 auto elapsed = std::chrono::steady_clock::now() - run_start;
@@ -333,7 +334,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
 
         if (lifecycle.restart_requested()) {
             lifecycle.clear();
-            g_running.store(false, std::memory_order_relaxed);
+            lifecycle.request_quit();
             coordinator.stop_dsp();
             coordinator.stop_source();
             return 75;
@@ -367,7 +368,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         uint64_t last_seq = 0;
         int written = 0;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
-        while (written < cfg.dump_frame_count && g_running.load(std::memory_order_relaxed) && std::chrono::steady_clock::now() < deadline) {
+        while (written < cfg.dump_frame_count && lifecycle.running() && std::chrono::steady_clock::now() < deadline) {
             const Frame* f = tb.acquire();
             if (f && f->seq != last_seq) {
                 last_seq = f->seq;
@@ -381,7 +382,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         }
         if (lifecycle.restart_requested()) {
             lifecycle.clear();
-            g_running.store(false, std::memory_order_relaxed);
+            lifecycle.request_quit();
             coordinator.stop_dsp();
             coordinator.stop_source();
             return 75;
@@ -402,7 +403,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             WebDisplay web_disp;
             if (!web_disp.init(cfg.web_port)) {
                 std::fprintf(stderr, "Web GUI init failed\n");
-                g_running.store(false);
+                lifecycle.request_quit();
                 coordinator.stop_dsp();
                 return 1;
             }
@@ -446,13 +447,13 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             auto last_clip_seen = last_frame_inc - std::chrono::seconds(10);
             uint64_t last_clip_count = 0;
 
-            while (g_running.load(std::memory_order_relaxed)) {
+            while (lifecycle.running()) {
                 auto config_lock = runtime.lock();
                 if (web_disp.restart_requested() || lifecycle.restart_requested()) {
                     config_lock.unlock();
                     std::printf("WebGUI: full application reinitialization requested\n");
                     lifecycle.clear();
-                    g_running.store(false, std::memory_order_relaxed);
+                    lifecycle.request_quit();
                     web_disp.request_quit();
                     coordinator.stop_dsp();
                     std::string restart_path; uint64_t restart_bytes = 0;
@@ -620,7 +621,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(16));
             }
 
-            g_running.store(false);
+            lifecycle.request_quit();
             web_disp.request_quit();
             coordinator.stop_dsp();
             std::string rec_path; uint64_t rec_bytes = 0;
@@ -635,7 +636,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         SdlDisplay disp;
         if (!disp.init("fpvdec - FPV ATV decoder", cfg.frame_width, cfg.frame_height)) {
             std::fprintf(stderr, "SDL init failed\n");
-            g_running.store(false);
+            lifecycle.request_quit();
             coordinator.stop_dsp();
             return 1;
         }
@@ -674,7 +675,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         auto last_clip_seen = fps_start - std::chrono::seconds(10);
         uint64_t last_clip_count = 0;
         std::string channel = fpv_nearest_channel(cfg.video_carrier_hz);
-        while (g_running.load(std::memory_order_relaxed)) {
+        while (lifecycle.running()) {
             KeyAction act = disp.poll();
             if (act == KeyAction::Quit) break;
 
@@ -908,7 +909,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         }
         if (use_imgui) gui.shutdown();
     }
-    g_running.store(false, std::memory_order_relaxed);
+    lifecycle.request_quit();
     coordinator.stop_source();
     coordinator.stop_dsp();
     std::string rec_path; uint64_t rec_bytes = 0;
