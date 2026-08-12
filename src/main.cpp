@@ -432,155 +432,6 @@ double carrier_offset_hz(const NtscDecoder& dec, const Config& cfg) {
     return 0.5 * (f_tip + f_white);
 }
 
-// Legacy temporary auto-detect worker; normal DSP construction is owned by
-// RuntimeCoordinator below.
-void dsp_thread(ConfigChangeQueue* events,
-                const Config& cfg, ISampleSource* src, NtscDecoder* dec,
-                Recorder* rec, std::atomic<float>* mean_raw) {
-    constexpr size_t kBlockBytes = 1 << 16;
-    size_t bytes_per_sample = src->sample_format() == SampleFormat::CS16 ? 4 : 2;
-    double sample_rate = cfg.sample_rate;
-    std::vector<uint8_t> raw(kBlockBytes);
-    std::vector<std::complex<float>> iq(kBlockBytes / 2);
-    std::vector<float> comp(kBlockBytes / 2);
-
-    DcBlocker dcb;
-    double offset_hz = cfg.offset_hz;
-    Nco mixer(offset_hz, sample_rate);
-    FirFilterC chan_lpf(design_lowpass(std::min(8.0e6, sample_rate * 0.49), sample_rate, 47));
-    double fm_dev = cfg.fm_dev_hz;
-    bool invert = cfg.invert;
-    FmDetector fm_det(sample_rate, fm_dev, invert);
-    double video_lpf = cfg.video_lpf_hz;
-    bool use_video_lpf = video_lpf > 0.0;
-    FirFilterF video_lpf_filter(design_lowpass(use_video_lpf ? std::min(video_lpf, sample_rate * 0.45) : 1.0, sample_rate, 63));
-
-    while (g_running.load(std::memory_order_relaxed)) {
-        // Poll for config changes before each block
-        if (events) {
-            ConfigChangeEvent evt;
-            while (events->pop(evt)) {
-                switch (evt.type) {
-                    case CFG_FM_DEV: {
-                        fm_dev = evt.val.dbl_val;
-                        fm_det = FmDetector(sample_rate, fm_dev, invert);
-                        std::printf("DSP: fm_dev=%.1f MHz; requesting full application reinitialization\n", fm_dev / 1e6);
-                        if (g_lifecycle) g_lifecycle->request_restart();
-                        break;
-                    }
-                    case CFG_INVERT: {
-                        invert = evt.val.bool_val;
-                        fm_det = FmDetector(sample_rate, fm_dev, invert);
-                        std::printf("DSP: invert=%s; requesting full application reinitialization\n", invert ? "true" : "false");
-                        if (g_lifecycle) g_lifecycle->request_restart();
-                        break;
-                    }
-                    case CFG_VIDEO_LPF: {
-                        video_lpf = evt.val.dbl_val;
-                        use_video_lpf = video_lpf > 0.0;
-                        video_lpf_filter = FirFilterF(design_lowpass(
-                            use_video_lpf ? std::min(video_lpf, sample_rate * 0.45) : 1.0,
-                            sample_rate, 63));
-                        std::printf("DSP: video_lpf=%.1f MHz; requesting full application reinitialization\n", video_lpf / 1e6);
-                        if (g_lifecycle) g_lifecycle->request_restart();
-                        break;
-                    }
-                    case CFG_SAMPLE_BITS:
-                        std::printf("DSP: sample_bits=%d; requesting full application reinitialization\n", evt.val.int_val);
-                        if (g_lifecycle) g_lifecycle->request_restart();
-                        break;
-                    case CFG_SAMPLE_RATE: {
-                        sample_rate = std::clamp(evt.val.dbl_val, 6e6, 20e6);
-                        offset_hz = cfg.offset_hz;
-                        mixer.set_freq(offset_hz, sample_rate);
-                        chan_lpf = FirFilterC(design_lowpass(std::min(8.0e6, sample_rate * 0.49), sample_rate, 47));
-                        std::printf("DSP: sample_rate event received: %.1f MSPS; rebuilding DSP filters\n", sample_rate / 1e6);
-                        fm_det = FmDetector(sample_rate, fm_dev, invert);
-                        video_lpf_filter = FirFilterF(design_lowpass(
-                            use_video_lpf ? std::min(video_lpf, sample_rate * 0.45) : 1.0,
-                            sample_rate, 63));
-                        std::printf("DSP: requesting full application reinitialization for sample-rate change\n");
-                        if (g_lifecycle) g_lifecycle->request_restart();
-                        break;
-                    }
-                    case CFG_OFFSET_HZ:
-                        offset_hz = evt.val.dbl_val;
-                        mixer.set_freq(offset_hz, sample_rate);
-                        std::printf("DSP: offset_hz=%.0f; requesting full application reinitialization\n", offset_hz);
-                        if (g_lifecycle) g_lifecycle->request_restart();
-                        break;
-                    case CFG_GAIN_AUTO:
-                        std::printf("DSP: gain mode=%s\n", evt.val.bool_val ? "auto" : "manual");
-                        break;
-                    case CFG_VIDEO_CARRIER:
-                        std::printf("DSP: carrier target=%.3f MHz\n", evt.val.dbl_val / 1e6);
-                        break;
-                    case CFG_AFC: {
-                        std::printf("DSP: AFC=%s (frequency tracking %s)\n",
-                                    evt.val.bool_val ? "enabled" : "disabled",
-                                    evt.val.bool_val ? "active" : "paused");
-                        break;
-                    }
-                    case CFG_SATURATION:
-                        dec->set_saturation(evt.val.flt_val);
-                        std::printf("DSP: saturation=%.2f; requesting full application reinitialization\n", evt.val.flt_val);
-                        if (g_lifecycle) g_lifecycle->request_restart();
-                        break;
-                    case CFG_HUE_DEG:
-                        dec->set_hue_deg(evt.val.flt_val);
-                        std::printf("DSP: hue_deg=%.1f; requesting full application reinitialization\n", evt.val.flt_val);
-                        if (g_lifecycle) g_lifecycle->request_restart();
-                        break;
-                    case CFG_OVERSCAN:
-                        dec->set_overscan(evt.val.flt_val);
-                        std::printf("DSP: overscan=%.3f; requesting full application reinitialization\n", evt.val.flt_val);
-                        if (g_lifecycle) g_lifecycle->request_restart();
-                        break;
-                    case CFG_FRAME_WIDTH:
-                    case CFG_FRAME_HEIGHT:
-                        std::printf("DSP: resolution change queued; requesting full application reinitialization\n");
-                        if (g_lifecycle) g_lifecycle->request_restart();
-                        break;
-                    default: break;
-                }
-            }
-        }
-
-        size_t n = src->read(raw.data(), raw.size() - (raw.size() % bytes_per_sample));
-        if (n == 0) {
-            if (src->failed())
-                std::fprintf(stderr, "input source stopped with error: %s\n", src->error().c_str());
-            break;
-        }
-        rec->write(raw.data(), n);
-        size_t ns = n / bytes_per_sample;
-        if (src->sample_format() == SampleFormat::CS16) {
-            const auto* samples = reinterpret_cast<const int16_t*>(raw.data());
-            for (size_t i = 0; i < ns; ++i) {
-                std::complex<float> c(samples[2 * i] / 32768.0f, samples[2 * i + 1] / 32768.0f);
-                iq[i] = dcb.process(c);
-            }
-        } else {
-            for (size_t i = 0; i < ns; ++i) {
-                std::complex<float> c(
-                    static_cast<float>(static_cast<int8_t>(raw[2 * i])) / 128.0f,
-                    static_cast<float>(static_cast<int8_t>(raw[2 * i + 1])) / 128.0f);
-                iq[i] = dcb.process(c);
-            }
-        }
-        if (offset_hz != 0.0) for (size_t i = 0; i < ns; ++i) iq[i] *= mixer.next();
-        chan_lpf.process(iq.data(), iq.data(), ns);
-        fm_det.process(iq.data(), comp.data(), ns);
-        if (use_video_lpf) video_lpf_filter.process(comp.data(), comp.data(), ns);
-        float sum = 0.0f;
-        for (size_t i = 0; i < ns; ++i) sum += comp[i];
-        float m = mean_raw->load(std::memory_order_relaxed);
-        mean_raw->store(0.97f * m + 0.03f * (sum / static_cast<float>(ns)), std::memory_order_relaxed);
-        dec->process(comp.data(), ns);
-    }
-    g_running.store(false, std::memory_order_relaxed);
-}
-
 int run_spectrum(const Config& cfg, ISampleSource* src) {
     size_t n_samples = static_cast<size_t>(cfg.sample_rate / 2);
     std::vector<uint8_t> buf(n_samples * 2);
@@ -679,7 +530,11 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         tmp_tb.resize(cfg.frame_width, cfg.frame_height);
         NtscDecoder tmp_dec(auto_cfg, tmp_tb);
         std::atomic<float> tmp_mean_raw{0.0f};
-        std::thread tmp_dsp(dsp_thread, nullptr, std::cref(auto_cfg), src, &tmp_dec, &rec, &tmp_mean_raw);
+        if (!coordinator.start_dsp(&tmp_dec, &rec, &tmp_mean_raw, nullptr)) {
+            std::fprintf(stderr, "failed to start auto-detection DSP\n");
+            coordinator.stop_source();
+            return 1;
+        }
         
         // Wait for detection (max 10 seconds)
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -691,7 +546,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         // Stop DSP thread and restart source stream cleanly. The source
         // pause/resume pair owns the backend-specific stream lifecycle.
         src->pause();
-        tmp_dsp.join();
+        coordinator.stop_dsp();
         src->resume();
         g_running.store(true, std::memory_order_relaxed);
         
