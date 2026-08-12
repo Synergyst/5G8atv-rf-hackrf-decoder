@@ -34,6 +34,11 @@ public:
         return std::unique_lock<std::mutex>(mutex_);
     }
 
+    Config snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return config_;
+    }
+
     Config& unsafe_config() { return config_; }
     const Config& unsafe_config() const { return config_; }
 

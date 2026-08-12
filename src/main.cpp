@@ -17,6 +17,7 @@
 #include "config_store.hpp"
 #include "runtime_control.hpp"
 #include "runtime_lifecycle.hpp"
+#include "runtime_session.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
 #include "dsp/fm_detector.hpp"
@@ -597,6 +598,7 @@ int run_spectrum(const Config& cfg, ISampleSource* src) {
 int run_application(Config& cfg, const Config& startup_baseline) {
     RuntimeControl runtime(cfg);
     RuntimeLifecycle lifecycle;
+    RuntimeSession session(cfg, runtime, lifecycle);
     g_lifecycle = &lifecycle;
 
     std::unique_ptr<ISampleSource> src;
@@ -749,7 +751,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
     cfg.frame_height = auto_cfg.frame_height;
     cfg.auto_res_applied = true;
     
-    tb.resize(cfg.frame_width, cfg.frame_height);
+    session.prepare_frames(tb);
     dec = new NtscDecoder(cfg, tb);
     dec->set_saturation(cfg.saturation);
     dec->set_hue_deg(cfg.hue_deg);
