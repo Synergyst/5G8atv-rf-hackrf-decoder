@@ -20,6 +20,7 @@
 #include "runtime_session.hpp"
 #include "runtime_coordinator.hpp"
 #include "runtime_modes.hpp"
+#include "runtime_recording.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
 #include "dsp/fm_detector.hpp"
@@ -361,68 +362,7 @@ void write_ppm(const Frame& f, const std::string& path) {
 
 std::atomic<bool> g_running{true};
 
-class Recorder : public IRawRecorder {
-public:
-    bool start(const std::string& path) {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (fp_) return false;
-        fp_ = std::fopen(path.c_str(), "wb");
-        if (!fp_) return false;
-        path_ = path;
-        bytes_ = 0;
-        started_ = std::chrono::steady_clock::now();
-        return true;
-    }
-
-    void write(const uint8_t* data, size_t n) override {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!fp_) return;
-        std::fwrite(data, 1, n, fp_);
-        bytes_ += n;
-    }
-
-    bool stop(std::string* path, uint64_t* bytes) {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!fp_) return false;
-        std::fclose(fp_);
-        fp_ = nullptr;
-        if (path) *path = path_;
-        if (bytes) *bytes = bytes_;
-        return true;
-    }
-
-    bool active() {
-        std::lock_guard<std::mutex> lk(mu_);
-        return fp_ != nullptr;
-    }
-
-    float seconds() {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!fp_) return 0.0f;
-        return std::chrono::duration<float>(std::chrono::steady_clock::now() - started_).count();
-    }
-
-private:
-    std::mutex mu_;
-    std::FILE* fp_ = nullptr;
-    std::string path_;
-    uint64_t bytes_ = 0;
-    std::chrono::steady_clock::time_point started_;
-};
-
-std::string next_recording_path() {
-    for (int i = 1; i < 1000; ++i) {
-        char name[64];
-        std::snprintf(name, sizeof(name), "fpvdec_rec_%03d.cs8", i);
-        std::FILE* f = std::fopen(name, "rb");
-        if (f) {
-            std::fclose(f);
-            continue;
-        }
-        return name;
-    }
-    return "fpvdec_rec_overflow.cs8";
-}
+using Recorder = RuntimeRecorder;
 
 double carrier_offset_hz(const NtscDecoder& dec, const Config& cfg) {
     double sgn = cfg.invert ? 1.0 : -1.0;
@@ -1048,7 +988,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                 std::string p; uint64_t b;
                 if (rec.stop(&p, &b))
                     std::printf("saved %s (%.1f MB) - replay: fpvdec --input file --file %s\n", p.c_str(), b / 1e6, p.c_str());
-                else if (rec.start(next_recording_path()))
+                else if (rec.start(famidec::next_recording_path()))
                     std::printf("recording IQ...\n");
                 std::fflush(stdout);
             }
