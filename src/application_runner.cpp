@@ -606,7 +606,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         // else: fall through to SDL/ImGui
 #endif  // HAVE_WEBGUI
 
-        bool use_imgui = (cfg.gui_mode == Config::GuiMode::ImGui);
+        const bool use_imgui = (cfg.gui_mode == Config::GuiMode::ImGui);
         SdlDisplay disp;
         if (!disp.init("fpvdec - FPV ATV decoder", cfg.frame_width, cfg.frame_height)) {
             std::fprintf(stderr, "SDL init failed\n");
