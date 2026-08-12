@@ -21,6 +21,7 @@
 #include "runtime_coordinator.hpp"
 #include "runtime_modes.hpp"
 #include "runtime_auto_resolution.hpp"
+#include "runtime_display.hpp"
 #include "runtime_recording.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
@@ -815,36 +816,14 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             st.freq_mhz = cfg.video_carrier_hz / 1e6;
             st.channel = channel;
 
-            // Render
-            float gui_screenshot = 0.0f;
+            RuntimeDisplay::render_filtered(disp, pipeline, f, st, use_imgui, crt_mode);
             if (use_imgui) {
-                // Apply filter pipeline if enabled
-                if (pipeline.empty()) {
-                    disp.render_video_only(f);
-                } else {
-                    Frame filtered;
-                    filtered.resize(mcfg.frame_width, mcfg.frame_height);
-                    filtered.rgba = f->rgba;
-                    pipeline.process(filtered);
-                    disp.render_video_only(&filtered);
-                }
-                gui_screenshot = gui.render(st);
+                float gui_screenshot = gui.render(st);
                 SDL_RenderPresent(disp.renderer());
                 if (gui_screenshot > 0.0f && have_shown) {
                     char path[64]; std::snprintf(path, sizeof(path), "fpvdec_%03d.bmp", shot++);
                     disp.screenshot(last_shown, path);
                     std::printf("saved %s\n", path);
-                }
-            } else {
-                // Apply filter pipeline if enabled
-                if (pipeline.empty()) {
-                    disp.render(f, st);
-                } else {
-                    Frame filtered;
-                    filtered.resize(mcfg.frame_width, mcfg.frame_height);
-                    filtered.rgba = f->rgba;
-                    pipeline.process(filtered);
-                    disp.render(&filtered, st);
                 }
             }
         }
