@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <vector>
+#include <stdexcept>
 
 namespace famidec {
 
@@ -16,10 +17,14 @@ struct Frame {
 
     // Resize the frame buffer to the specified dimensions.
     void resize(int w, int h) {
+        if (w <= 0 || h <= 0) throw std::invalid_argument("invalid frame dimensions");
+        const size_t pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
+        if (pixels > 32u * 1024u * 1024u)
+            throw std::length_error("frame dimensions exceed safety limit");
         width = w;
         height = h;
         // 0xff000000u is black (BGRA: B=0, G=0, R=0, A=255)
-        rgba.resize(w * h, 0xff000000u);
+        rgba.assign(pixels, 0xff000000u);
     }
 };
 
@@ -29,6 +34,9 @@ class TripleBuffer {
 public:
     Frame& back() { return bufs_[back_idx_]; }
 
+    // Must be called while the producer and consumer are stopped. Runtime
+    // resolution changes are handled by the lifecycle coordinator; this
+    // method is intentionally not thread-safe.
     void resize(int w, int h) {
         for (auto& buf : bufs_) {
             buf.resize(w, h);

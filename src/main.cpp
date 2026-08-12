@@ -16,6 +16,7 @@
 #include "config.hpp"
 #include "config_store.hpp"
 #include "runtime_control.hpp"
+#include "runtime_lifecycle.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
 #include "dsp/fm_detector.hpp"
@@ -356,7 +357,7 @@ void write_ppm(const Frame& f, const std::string& path) {
 }
 
 std::atomic<bool> g_running{true};
-std::atomic<bool> g_restart_requested{false};
+RuntimeLifecycle* g_lifecycle = nullptr;
 
 class Recorder {
 public:
@@ -460,14 +461,14 @@ void dsp_thread(ConfigChangeQueue* events,
                         fm_dev = evt.val.dbl_val;
                         fm_det = FmDetector(sample_rate, fm_dev, invert);
                         std::printf("DSP: fm_dev=%.1f MHz; requesting full application reinitialization\n", fm_dev / 1e6);
-                        g_restart_requested.store(true, std::memory_order_release);
+                        if (g_lifecycle) g_lifecycle->request_restart();
                         break;
                     }
                     case CFG_INVERT: {
                         invert = evt.val.bool_val;
                         fm_det = FmDetector(sample_rate, fm_dev, invert);
                         std::printf("DSP: invert=%s; requesting full application reinitialization\n", invert ? "true" : "false");
-                        g_restart_requested.store(true, std::memory_order_release);
+                        if (g_lifecycle) g_lifecycle->request_restart();
                         break;
                     }
                     case CFG_VIDEO_LPF: {
@@ -477,12 +478,12 @@ void dsp_thread(ConfigChangeQueue* events,
                             use_video_lpf ? std::min(video_lpf, sample_rate * 0.45) : 1.0,
                             sample_rate, 63));
                         std::printf("DSP: video_lpf=%.1f MHz; requesting full application reinitialization\n", video_lpf / 1e6);
-                        g_restart_requested.store(true, std::memory_order_release);
+                        if (g_lifecycle) g_lifecycle->request_restart();
                         break;
                     }
                     case CFG_SAMPLE_BITS:
                         std::printf("DSP: sample_bits=%d; requesting full application reinitialization\n", evt.val.int_val);
-                        g_restart_requested.store(true, std::memory_order_release);
+                        if (g_lifecycle) g_lifecycle->request_restart();
                         break;
                     case CFG_SAMPLE_RATE: {
                         sample_rate = std::clamp(evt.val.dbl_val, 6e6, 20e6);
@@ -495,14 +496,14 @@ void dsp_thread(ConfigChangeQueue* events,
                             use_video_lpf ? std::min(video_lpf, sample_rate * 0.45) : 1.0,
                             sample_rate, 63));
                         std::printf("DSP: requesting full application reinitialization for sample-rate change\n");
-                        g_restart_requested.store(true, std::memory_order_release);
+                        if (g_lifecycle) g_lifecycle->request_restart();
                         break;
                     }
                     case CFG_OFFSET_HZ:
                         offset_hz = evt.val.dbl_val;
                         mixer.set_freq(offset_hz, sample_rate);
                         std::printf("DSP: offset_hz=%.0f; requesting full application reinitialization\n", offset_hz);
-                        g_restart_requested.store(true, std::memory_order_release);
+                        if (g_lifecycle) g_lifecycle->request_restart();
                         break;
                     case CFG_GAIN_AUTO:
                         std::printf("DSP: gain mode=%s\n", evt.val.bool_val ? "auto" : "manual");
@@ -519,22 +520,22 @@ void dsp_thread(ConfigChangeQueue* events,
                     case CFG_SATURATION:
                         dec->set_saturation(evt.val.flt_val);
                         std::printf("DSP: saturation=%.2f; requesting full application reinitialization\n", evt.val.flt_val);
-                        g_restart_requested.store(true, std::memory_order_release);
+                        if (g_lifecycle) g_lifecycle->request_restart();
                         break;
                     case CFG_HUE_DEG:
                         dec->set_hue_deg(evt.val.flt_val);
                         std::printf("DSP: hue_deg=%.1f; requesting full application reinitialization\n", evt.val.flt_val);
-                        g_restart_requested.store(true, std::memory_order_release);
+                        if (g_lifecycle) g_lifecycle->request_restart();
                         break;
                     case CFG_OVERSCAN:
                         dec->set_overscan(evt.val.flt_val);
                         std::printf("DSP: overscan=%.3f; requesting full application reinitialization\n", evt.val.flt_val);
-                        g_restart_requested.store(true, std::memory_order_release);
+                        if (g_lifecycle) g_lifecycle->request_restart();
                         break;
                     case CFG_FRAME_WIDTH:
                     case CFG_FRAME_HEIGHT:
                         std::printf("DSP: resolution change queued; requesting full application reinitialization\n");
-                        g_restart_requested.store(true, std::memory_order_release);
+                        if (g_lifecycle) g_lifecycle->request_restart();
                         break;
                     default: break;
                 }
@@ -595,6 +596,8 @@ int run_spectrum(const Config& cfg, ISampleSource* src) {
 
 int run_application(Config& cfg, const Config& startup_baseline) {
     RuntimeControl runtime(cfg);
+    RuntimeLifecycle lifecycle;
+    g_lifecycle = &lifecycle;
 
     std::unique_ptr<ISampleSource> src;
     HackRfSource* hackrf = nullptr;
@@ -893,7 +896,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                 return 1;
             }
             // Wire in config + source so /api/set can control hardware.
-            web_disp.set_source_and_config(&cfg, src.get(), &startup_baseline, &runtime);
+            web_disp.set_source_and_config(&cfg, src.get(), &startup_baseline, &runtime, &lifecycle);
             web_disp.set_config_queue(&web_events_store);
             web_disp.set_config_queue(&web_events_store);
 
@@ -967,10 +970,10 @@ int run_application(Config& cfg, const Config& startup_baseline) {
 
             while (g_running.load(std::memory_order_relaxed)) {
                 auto config_lock = runtime.lock();
-                if (web_disp.restart_requested() || g_restart_requested.load(std::memory_order_acquire)) {
+                if (web_disp.restart_requested() || (g_lifecycle && g_lifecycle->restart_requested())) {
                     config_lock.unlock();
                     std::printf("WebGUI: full application reinitialization requested\n");
-                    g_restart_requested.store(false, std::memory_order_release);
+                    if (g_lifecycle) g_lifecycle->clear();
                     g_running.store(false, std::memory_order_relaxed);
                     web_disp.request_quit();
                     if (dsp.joinable()) dsp.join();
@@ -1012,7 +1015,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                         // Resolution changes are structural. Let the common
                         // restart path rebuild buffers and filters after all
                         // producer threads have stopped.
-                        web_disp.request_restart();
+                        lifecycle.request_restart();
                         std::printf("AUTO-RES: detected %s (chroma=%.2f MHz, %d active lines, "
                                    "horiz_detail=%d, line_rate=%.3f kHz)\n  -> %dx%d\n",
                                    is_pal ? "PAL" : "NTSC", chroma_hz / 1e6, active_lines,
@@ -1067,7 +1070,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                         // Resolution changes are structural. Restart the whole
                         // application rather than resizing buffers while DSP
                         // may still be writing into a published frame.
-                        web_disp.request_restart();
+                        lifecycle.request_restart();
                         continue;
                     }
 
@@ -1158,8 +1161,8 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             dsp.join();
             return 1;
         }
-        tb.resize(cfg.frame_width, cfg.frame_height);
-        disp.rebuild_crt_lut(cfg.frame_width, cfg.frame_height);
+        // The decoder/frame buffers were sized before DSP start. Do not resize
+        // TripleBuffer from the UI loop; structural changes restart the run.
 
         GuiManager gui;
         if (use_imgui) {
@@ -1325,7 +1328,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                 mcfg.auto_res_applied = true;
                 // Resolution changes are structural. Stop the current run and
                 // let the outer restart path rebuild all frame/display state.
-                g_restart_requested.store(true, std::memory_order_release);
+                if (g_lifecycle) g_lifecycle->request_restart();
                 std::printf("AUTO-RES: detected %s (chroma=%.2f MHz, %d active lines, "
                            "horiz_detail=%d, line_rate=%.3f kHz)\n  -> %dx%d\n",
                            is_pal ? "PAL" : "NTSC", chroma_hz / 1e6, active_lines,

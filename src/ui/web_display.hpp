@@ -11,6 +11,7 @@
 
 #include "../config.hpp"
 #include "../runtime_control.hpp"
+#include "../runtime_lifecycle.hpp"
 #ifdef HAVE_WEBGUI
 namespace httplib { class Server; }
 #endif
@@ -27,7 +28,10 @@ public:
 
     bool init(int port = 8080, const std::string& title = "fpvdec");
     void request_quit();
-    void request_restart() { restart_requested_.store(true); }
+    void request_restart() {
+        restart_requested_.store(true);
+        if (lifecycle_) lifecycle_->request_restart();
+    }
     void set_target_fps(int fps);
 
     bool is_running() const { return running_.load(); }
@@ -40,11 +44,13 @@ public:
 
     void set_source_and_config(Config* cfg, ISampleSource* src,
                                const Config* reset_cfg = nullptr,
-                               RuntimeControl* runtime = nullptr) {
+                               RuntimeControl* runtime = nullptr,
+                               RuntimeLifecycle* lifecycle = nullptr) {
         cfg_ = cfg;
         source_ = src;
         reset_cfg_ = reset_cfg;
         runtime_ = runtime;
+        lifecycle_ = lifecycle;
     }
 
     void set_config_queue(ConfigChangeQueue* queue) {
@@ -83,6 +89,7 @@ private:
     const Config* reset_cfg_ = nullptr;
     ConfigChangeQueue* config_queue_ = nullptr;
     RuntimeControl* runtime_ = nullptr;
+    RuntimeLifecycle* lifecycle_ = nullptr;
 };
 
 } // namespace famidec
