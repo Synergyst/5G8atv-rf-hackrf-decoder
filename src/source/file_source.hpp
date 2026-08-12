@@ -19,8 +19,10 @@ public:
     ~FileSource() override { stop(); }
 
     bool start() override {
+        error_.clear();
         fp_ = std::fopen(cfg_.file_path.c_str(), "rb");
         start_time_ = std::chrono::steady_clock::now();
+        if (!fp_) error_ = "cannot open file: " + cfg_.file_path;
         return fp_ != nullptr;
     }
 
@@ -55,6 +57,7 @@ public:
 
 public:
     uint64_t total_bytes() const override { return total_bytes_; }
+    const std::string& error() const override { return error_; }
 
 private:
     const Config& cfg_;
@@ -62,6 +65,7 @@ private:
     std::FILE* fp_ = nullptr;
     uint64_t total_bytes_ = 0;
     std::chrono::steady_clock::time_point start_time_;
+    std::string error_;
 };
 
 }  // namespace famidec

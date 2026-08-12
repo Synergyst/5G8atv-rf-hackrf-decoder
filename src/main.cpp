@@ -18,6 +18,7 @@
 #include "runtime_control.hpp"
 #include "runtime_lifecycle.hpp"
 #include "runtime_session.hpp"
+#include "runtime_coordinator.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
 #include "dsp/fm_detector.hpp"
@@ -360,7 +361,7 @@ void write_ppm(const Frame& f, const std::string& path) {
 std::atomic<bool> g_running{true};
 RuntimeLifecycle* g_lifecycle = nullptr;
 
-class Recorder {
+class Recorder : public IRawRecorder {
 public:
     bool start(const std::string& path) {
         std::lock_guard<std::mutex> lk(mu_);
@@ -373,7 +374,7 @@ public:
         return true;
     }
 
-    void write(const uint8_t* data, size_t n) {
+    void write(const uint8_t* data, size_t n) override {
         std::lock_guard<std::mutex> lk(mu_);
         if (!fp_) return;
         std::fwrite(data, 1, n, fp_);
@@ -431,6 +432,8 @@ double carrier_offset_hz(const NtscDecoder& dec, const Config& cfg) {
     return 0.5 * (f_tip + f_white);
 }
 
+// Legacy temporary auto-detect worker; normal DSP construction is owned by
+// RuntimeCoordinator below.
 void dsp_thread(ConfigChangeQueue* events,
                 const Config& cfg, ISampleSource* src, NtscDecoder* dec,
                 Recorder* rec, std::atomic<float>* mean_raw) {
@@ -601,42 +604,27 @@ int run_application(Config& cfg, const Config& startup_baseline) {
     RuntimeSession session(cfg, runtime, lifecycle);
     g_lifecycle = &lifecycle;
 
-    std::unique_ptr<ISampleSource> src;
-    HackRfSource* hackrf = nullptr;
-#ifdef HAVE_SOAPYSDR
-    SoapySource* soapysdr = nullptr;
-#endif
-#ifdef HAVE_UHD
-    UhdSource* uhd = nullptr;
-#endif
-    
-    if (cfg.input == Config::Input::HackRF) {
-        auto h = std::make_unique<HackRfSource>(cfg);
-        hackrf = h.get();
-        src = std::move(h);
-#ifdef HAVE_SOAPYSDR
-    } else if (cfg.input == Config::Input::SoapySDR) {
-        auto s = std::make_unique<SoapySource>(cfg, cfg.soapysdr_device_args);
-        soapysdr = s.get();
-        src = std::move(s);
-#endif
-#ifdef HAVE_UHD
-    } else if (cfg.input == Config::Input::UHD) {
-        auto u = std::make_unique<UhdSource>(cfg);
-        uhd = u.get();
-        src = std::move(u);
-#endif
-    } else {
-        src = std::make_unique<FileSource>(cfg, !cfg.headless && !cfg.spectrum);
+    RuntimeCoordinator coordinator(cfg, runtime, lifecycle, g_running);
+    if (!coordinator.create_source(!cfg.headless && !cfg.spectrum)) {
+        std::fprintf(stderr, "failed to create input source\n");
+        return 1;
     }
-    if (!src->start()) {
+    ISampleSource* src = coordinator.source();
+    HackRfSource* hackrf = dynamic_cast<HackRfSource*>(src);
+#ifdef HAVE_SOAPYSDR
+    SoapySource* soapysdr = dynamic_cast<SoapySource*>(src);
+#endif
+#ifdef HAVE_UHD
+    UhdSource* uhd = dynamic_cast<UhdSource*>(src);
+#endif
+    if (!coordinator.start_source()) {
         std::fprintf(stderr, "failed to start input source: %s\n", src->error().c_str());
         return 1;
     }
     if (cfg.sample_bits == 16 && src->sample_format() != SampleFormat::CS16) {
         std::fprintf(stderr, "error: --bits 16 is only supported by UHD/SoapySDR sources; this source provides %s\n",
                      sample_format_name(src->sample_format()));
-        src->stop();
+        coordinator.stop_source();
         return 2;
     }
     // CLKIN check: if enforcement is requested, verify external clock is locked
@@ -668,8 +656,8 @@ int run_application(Config& cfg, const Config& startup_baseline) {
     std::printf("input: %s   format %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n", source_name.c_str(), sample_format_name(src->sample_format()), cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6, cfg.sample_rate / 1e6);
 
     if (cfg.spectrum) {
-        int rc = run_spectrum(cfg, src.get());
-        src->stop();
+        int rc = run_spectrum(cfg, src);
+        coordinator.stop_source();
         return rc;
     }
 
@@ -682,7 +670,6 @@ int run_application(Config& cfg, const Config& startup_baseline) {
     TripleBuffer tb;
     NtscDecoder* dec = nullptr;
     std::atomic<float> mean_raw{0.0f};
-    std::thread dsp;
 
     // Auto-resolution: detect before starting DSP thread
     Config auto_cfg = cfg;
@@ -692,7 +679,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         tmp_tb.resize(cfg.frame_width, cfg.frame_height);
         NtscDecoder tmp_dec(auto_cfg, tmp_tb);
         std::atomic<float> tmp_mean_raw{0.0f};
-        std::thread tmp_dsp(dsp_thread, nullptr, std::cref(auto_cfg), src.get(), &tmp_dec, &rec, &tmp_mean_raw);
+        std::thread tmp_dsp(dsp_thread, nullptr, std::cref(auto_cfg), src, &tmp_dec, &rec, &tmp_mean_raw);
         
         // Wait for detection (max 10 seconds)
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -763,7 +750,10 @@ int run_application(Config& cfg, const Config& startup_baseline) {
     web_events = &web_events_store;
 #endif
     runtime.set_event_queue(web_events);
-    dsp = std::thread(dsp_thread, web_events, std::cref(cfg), src.get(), dec, &rec, &mean_raw);
+    if (!coordinator.start_dsp(dec, &rec, &mean_raw, web_events)) {
+        std::fprintf(stderr, "failed to start DSP coordinator\n");
+        return 1;
+    }
 
     int rc = 0;
 
@@ -843,8 +833,8 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         if (g_lifecycle && g_lifecycle->restart_requested()) {
             g_lifecycle->clear();
             g_running.store(false, std::memory_order_relaxed);
-            if (dsp.joinable()) dsp.join();
-            src->stop();
+            coordinator.stop_dsp();
+            coordinator.stop_source();
             return 75;
         }
 
@@ -891,8 +881,8 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         if (g_lifecycle && g_lifecycle->restart_requested()) {
             g_lifecycle->clear();
             g_running.store(false, std::memory_order_relaxed);
-            if (dsp.joinable()) dsp.join();
-            src->stop();
+            coordinator.stop_dsp();
+            coordinator.stop_source();
             return 75;
         }
         std::printf("wrote %d frames; decoded lines=%llu coasted=%llu frames=%llu\n",
@@ -912,11 +902,11 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             if (!web_disp.init(cfg.web_port)) {
                 std::fprintf(stderr, "Web GUI init failed\n");
                 g_running.store(false);
-                dsp.join();
+                coordinator.stop_dsp();
                 return 1;
             }
             // Wire in config + source so /api/set can control hardware.
-            web_disp.set_source_and_config(src.get(), &startup_baseline, &runtime, &lifecycle);
+            web_disp.set_source_and_config(src, &startup_baseline, &runtime, &lifecycle);
             web_disp.set_config_queue(&web_events_store);
             web_disp.set_config_queue(&web_events_store);
 
@@ -996,7 +986,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                     if (g_lifecycle) g_lifecycle->clear();
                     g_running.store(false, std::memory_order_relaxed);
                     web_disp.request_quit();
-                    if (dsp.joinable()) dsp.join();
+                    coordinator.stop_dsp();
                     std::string restart_path; uint64_t restart_bytes = 0;
                     rec.stop(&restart_path, &restart_bytes);
                     return 75;
@@ -1164,7 +1154,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
 
             g_running.store(false);
             web_disp.request_quit();
-            if (dsp.joinable()) dsp.join();
+            coordinator.stop_dsp();
             std::string rec_path; uint64_t rec_bytes = 0;
             if (rec.stop(&rec_path, &rec_bytes))
                 std::printf("saved %s (%.1f MB) - replay: fpvdec --input file --file %s\n", rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());
@@ -1178,7 +1168,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         if (!disp.init("fpvdec - FPV ATV decoder", cfg.frame_width, cfg.frame_height)) {
             std::fprintf(stderr, "SDL init failed\n");
             g_running.store(false);
-            dsp.join();
+            coordinator.stop_dsp();
             return 1;
         }
         // The decoder/frame buffers were sized before DSP start. Do not resize
@@ -1467,8 +1457,8 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         if (use_imgui) gui.shutdown();
     }
     g_running.store(false, std::memory_order_relaxed);
-    src->stop();
-    dsp.join();
+    coordinator.stop_source();
+    coordinator.stop_dsp();
     std::string rec_path; uint64_t rec_bytes = 0;
     if (rec.stop(&rec_path, &rec_bytes))
         std::printf("saved %s (%.1f MB) - replay: fpvdec --input file --file %s\n", rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());

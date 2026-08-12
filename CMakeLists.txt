@@ -59,6 +59,7 @@ target_include_directories(fpv_dsp PUBLIC src)
 add_executable(fpvdec
     src/main.cpp
     src/config_store.cpp
+    src/runtime_coordinator.cpp
     src/source/hackrf_source.cpp
     src/ui/sdl_display.cpp
     src/ui/gui_manager.cpp
@@ -149,5 +150,9 @@ add_test(NAME triple_buffer_tests COMMAND triple_buffer_tests)
 add_executable(source_lifecycle_tests tests/source_lifecycle_tests.cpp)
 target_include_directories(source_lifecycle_tests PRIVATE src)
 add_test(NAME source_lifecycle_tests COMMAND source_lifecycle_tests)
+add_executable(runtime_coordinator_tests tests/runtime_coordinator_tests.cpp src/runtime_coordinator.cpp src/source/hackrf_source.cpp)
+target_include_directories(runtime_coordinator_tests PRIVATE src)
+target_link_libraries(runtime_coordinator_tests PRIVATE fpv_dsp Threads::Threads ${HACKRF_TARGET})
+add_test(NAME runtime_coordinator_tests COMMAND runtime_coordinator_tests)
 add_test(NAME synth_fm_long COMMAND synth_fm --fields 100 --check-frames)
 set_tests_properties(synth_fm_long PROPERTIES LABELS "long")
