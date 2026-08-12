@@ -19,6 +19,7 @@
 #include "runtime_lifecycle.hpp"
 #include "runtime_session.hpp"
 #include "runtime_coordinator.hpp"
+#include "runtime_modes.hpp"
 #include "dsp/dc_blocker.hpp"
 #include "dsp/fir.hpp"
 #include "dsp/fm_detector.hpp"
@@ -359,7 +360,6 @@ void write_ppm(const Frame& f, const std::string& path) {
 }
 
 std::atomic<bool> g_running{true};
-RuntimeLifecycle* g_lifecycle = nullptr;
 
 class Recorder : public IRawRecorder {
 public:
@@ -453,7 +453,6 @@ int run_application(Config& cfg, const Config& startup_baseline) {
     RuntimeControl runtime(cfg);
     RuntimeLifecycle lifecycle;
     RuntimeSession session(cfg, runtime, lifecycle);
-    g_lifecycle = &lifecycle;
 
     RuntimeCoordinator coordinator(cfg, runtime, lifecycle, g_running);
     if (!coordinator.create_source(!cfg.headless && !cfg.spectrum)) {
@@ -685,8 +684,8 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
 
-        if (g_lifecycle && g_lifecycle->restart_requested()) {
-            g_lifecycle->clear();
+        if (lifecycle.restart_requested()) {
+            lifecycle.clear();
             g_running.store(false, std::memory_order_relaxed);
             coordinator.stop_dsp();
             coordinator.stop_source();
@@ -733,8 +732,8 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
         }
-        if (g_lifecycle && g_lifecycle->restart_requested()) {
-            g_lifecycle->clear();
+        if (lifecycle.restart_requested()) {
+            lifecycle.clear();
             g_running.store(false, std::memory_order_relaxed);
             coordinator.stop_dsp();
             coordinator.stop_source();
@@ -767,23 +766,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
 
             // Build the filter pipeline
             FilterPipeline pipeline;
-            if (cfg.denoise > 0.0f) {
-                auto* denoise = new Denoiser();
-                denoise->set_strength(cfg.denoise);
-                pipeline.add(denoise);
-            }
-            if (cfg.denoise_temporal > 0.0f) {
-                auto* temporal = new TemporalFilter();
-                temporal->set_alpha(cfg.denoise_temporal);
-                pipeline.add(temporal);
-            }
-            if (cfg.denoise_temporal_median > 0) {
-                auto* tmed = new TemporalMedian();
-                tmed->set_frames(cfg.denoise_temporal_median);
-                tmed->set_strength(cfg.denoise_temporal_median_strength);
-                pipeline.add(tmed);
-            }
-            pipeline.init(cfg.frame_width, cfg.frame_height);
+            RuntimeModeSupport::build_filters(cfg, pipeline);
             float last_denoise = cfg.denoise;
             float last_denoise_temporal = cfg.denoise_temporal;
             int last_denoise_median = cfg.denoise_temporal_median;
@@ -792,24 +775,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
             int last_pipeline_height = cfg.frame_height;
 
             auto rebuild_web_pipeline = [&]() {
-                pipeline.clear();
-                if (cfg.denoise > 0.0f) {
-                    auto* denoise = new Denoiser();
-                    denoise->set_strength(cfg.denoise);
-                    pipeline.add(denoise);
-                }
-                if (cfg.denoise_temporal > 0.0f) {
-                    auto* temporal = new TemporalFilter();
-                    temporal->set_alpha(cfg.denoise_temporal);
-                    pipeline.add(temporal);
-                }
-                if (cfg.denoise_temporal_median > 0) {
-                    auto* tmed = new TemporalMedian();
-                    tmed->set_frames(cfg.denoise_temporal_median);
-                    tmed->set_strength(cfg.denoise_temporal_median_strength);
-                    pipeline.add(tmed);
-                }
-                pipeline.init(cfg.frame_width, cfg.frame_height);
+                RuntimeModeSupport::build_filters(cfg, pipeline);
                 last_denoise = cfg.denoise;
                 last_denoise_temporal = cfg.denoise_temporal;
                 last_denoise_median = cfg.denoise_temporal_median;
@@ -835,10 +801,10 @@ int run_application(Config& cfg, const Config& startup_baseline) {
 
             while (g_running.load(std::memory_order_relaxed)) {
                 auto config_lock = runtime.lock();
-                if (web_disp.restart_requested() || (g_lifecycle && g_lifecycle->restart_requested())) {
+                if (web_disp.restart_requested() || lifecycle.restart_requested()) {
                     config_lock.unlock();
                     std::printf("WebGUI: full application reinitialization requested\n");
-                    if (g_lifecycle) g_lifecycle->clear();
+                    lifecycle.clear();
                     g_running.store(false, std::memory_order_relaxed);
                     web_disp.request_quit();
                     coordinator.stop_dsp();
@@ -1040,23 +1006,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
         // Build the filter pipeline from config.
         // Filters are auto-registered via REGISTER_FILTER() macro.
         FilterPipeline pipeline;
-        if (mcfg.denoise > 0.0f) {
-            auto* denoise = new Denoiser();
-            denoise->set_strength(mcfg.denoise);
-            pipeline.add(denoise);
-        }
-        if (mcfg.denoise_temporal > 0.0f) {
-            auto* temporal = new TemporalFilter();
-            temporal->set_alpha(mcfg.denoise_temporal);
-            pipeline.add(temporal);
-        }
-        if (mcfg.denoise_temporal_median > 0) {
-            auto* tmed = new TemporalMedian();
-            tmed->set_frames(mcfg.denoise_temporal_median);
-            tmed->set_strength(mcfg.denoise_temporal_median_strength);
-            pipeline.add(tmed);
-        }
-        pipeline.init(mcfg.frame_width, mcfg.frame_height);
+        RuntimeModeSupport::build_filters(mcfg, pipeline);
         int shot = 0;
         Frame last_shown;
         bool have_shown = false;
@@ -1193,7 +1143,7 @@ int run_application(Config& cfg, const Config& startup_baseline) {
                 mcfg.auto_res_applied = true;
                 // Resolution changes are structural. Stop the current run and
                 // let the outer restart path rebuild all frame/display state.
-                if (g_lifecycle) g_lifecycle->request_restart();
+                lifecycle.request_restart();
                 std::printf("AUTO-RES: detected %s (chroma=%.2f MHz, %d active lines, "
                            "horiz_detail=%d, line_rate=%.3f kHz)\n  -> %dx%d\n",
                            is_pal ? "PAL" : "NTSC", chroma_hz / 1e6, active_lines,

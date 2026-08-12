@@ -18,6 +18,7 @@ public:
     bool quit_requested() const { return request() == Request::Quit; }
     void clear() { request_.store(Request::None, std::memory_order_release); }
 
+
 private:
     std::atomic<Request> request_{Request::None};
 };
